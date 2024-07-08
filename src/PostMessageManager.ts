@@ -29,7 +29,7 @@ export namespace PostMessageManager {
   export interface RegisterProps {
     messageType: string;
     callback: (payload: any) => Promise<any> | any;
-    origin?: string;
+    origin?: string | ((origin: string) => boolean);
   }
   export interface SendProps {
     messageType: string;
@@ -81,9 +81,19 @@ export class PostMessageManagerImpl implements PostMessageManager {
         return;
       }
 
-      // handler의 origin이 정의되어 있을 때, event의 origin과 다르면 무시한다.
-      if (handler.origin && event.origin !== handler.origin) {
-        return;
+      // handler의 origin이 정의되어 있을 때, origin 체크를 합니다.
+      if (handler.origin) {
+        if (typeof handler.origin === "string") {
+          // origin이 string일 때는 정확히 일치하는지 확인합니다.
+          if (handler.origin !== event.origin) {
+            return;
+          }
+        } else {
+          // origin이 함수일 때는 함수의 return 값이 true인지 확인합니다.
+          if (!handler.origin(event.origin)) {
+            return;
+          }
+        }
       }
 
       // request message에 대해서는 항상 response message를 보낸다.
