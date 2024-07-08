@@ -5,7 +5,7 @@
   "types": "dist/index.d.ts",
   "license": "ISC",
   "scripts": {
-    "build": "tsc"
+    "build": "rm -rf ./dist && tsc"
   },
   "devDependencies": {
     "typescript": "^5.4.3"
