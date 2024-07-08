@@ -94,7 +94,6 @@ export class PostMessageManagerImpl implements PostMessageManager {
             return;
           }
         }
-        return;
       }
 
       // request message에 대해서는 항상 response message를 보낸다.
