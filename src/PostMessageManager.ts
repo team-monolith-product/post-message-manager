@@ -36,6 +36,7 @@ export namespace PostMessageManager {
     payload: any;
     target: Window;
     targetOrigin: string;
+    timeoutMs?: number;
   }
 }
 
@@ -134,13 +135,27 @@ export class PostMessageManagerImpl implements PostMessageManager {
   }
 
   async send<T>(args: PostMessageManager.SendProps) {
-    const { messageType, payload, target, targetOrigin } = args;
+    const {
+      messageType,
+      payload,
+      target,
+      targetOrigin,
+      timeoutMs: timeoutMsArgs,
+    } = args;
     const id = uid();
+
+    // args로 timeoutMs를 설정하면 그 값을 사용하고, 없으면 기본값을 사용합니다.
+    const timeoutMs = timeoutMsArgs ?? this.timeoutMs;
+
     const promise = new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
-        reject(new Error("Timeout"));
+        reject(
+          new Error(
+            `Timeout: no response for ${messageType} after ${timeoutMs}ms`
+          )
+        );
         this.unregister(id);
-      }, this.timeoutMs);
+      }, timeoutMs);
 
       const message: MessageRequest = {
         type: "request",
