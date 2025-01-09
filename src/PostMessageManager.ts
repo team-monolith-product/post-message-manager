@@ -36,6 +36,9 @@ export namespace PostMessageManager {
     payload: any;
     target: Window;
     targetOrigin: string;
+
+    /** response message를 받을 때까지 기다릴 시간 (ms).
+     * 이 시간이 지나도 message가 오지 않으면 Error를 reject 합니다. */
     timeoutMs?: number;
   }
 }
