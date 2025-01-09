@@ -41,6 +41,7 @@ export namespace PostMessageManager {
      * 이 시간이 지나도 message가 오지 않으면 Error를 reject 합니다. */
     timeoutMs?: number;
   }
+  export type NotifyProps = Omit<SendProps, "timeoutMs">;
 }
 
 /**
@@ -50,6 +51,11 @@ export namespace PostMessageManager {
  *  - 이 함수에서는 Promise를 반환하며, 다른 window에서 보낸 메시지에 대한 응답을 받으면 resolve 됩니다.
  *  - timeoutMs 시간이 지나면 reject 됩니다.
  *  - 내부적으로 responseHandlers에 ResponseHandler 타입의 객체를 저장합니다.
+ *
+ * notify 함수를 이용하여 다른 window에게 메시지를 보낼 수 있습니다.
+ * - send와 비슷하나, 이 함수는 응답을 받지 않으며, promise를 반환하지 않습니다.
+ * - 단방향 통신이 필요할 때 사용합니다.
+ *
  * register 함수를 이용하여 다른 window로부터 메시지를 받을 때, 어떤 callback 함수를 실행할지 등록할 수 있습니다.
  *  - 내부적으로 requestHandlers에 RequestHandler 타입의 객체를 저장합니다.
  * unregister 함수를 이용하여 등록된 callback 함수를 삭제할 수 있습니다.
@@ -58,6 +64,7 @@ export interface PostMessageManager {
   register(args: PostMessageManager.RegisterProps): void;
   unregister(messageType: string): void;
   send<T>(args: PostMessageManager.SendProps): Promise<T>;
+  notify(args: PostMessageManager.NotifyProps): void;
 }
 
 export class PostMessageManagerImpl implements PostMessageManager {
@@ -175,6 +182,17 @@ export class PostMessageManagerImpl implements PostMessageManager {
       };
     });
     return promise;
+  }
+
+  notify(args: PostMessageManager.NotifyProps): void {
+    const { messageType, payload, target, targetOrigin } = args;
+    const message: MessageRequest = {
+      type: "request",
+      id: uid(),
+      payload,
+      messageType,
+    };
+    target.postMessage(message, targetOrigin);
   }
 
   requestHandlers: Record<string, RequestHandler>;
