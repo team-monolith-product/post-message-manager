@@ -5,9 +5,13 @@
   "types": "dist/index.d.ts",
   "license": "ISC",
   "scripts": {
-    "build": "rm -rf ./dist && tsc"
+    "clean": "rm -rf dist",
+    "build": "npm run clean && npm run build:npm && npm run build:browser",
+    "build:npm": "tsc",
+    "build:browser": "esbuild src/index.ts --bundle --outfile=dist/post-message-manager.js --format=iife --global-name=PostMessageManager --minify"
   },
   "devDependencies": {
+    "esbuild": "^0.25.11",
     "typescript": "^5.4.3"
   },
   "dependencies": {
