@@ -21,7 +21,7 @@ npm install @team-monolith/post-message-manager
 ### 기본 설정
 
 ```typescript
-import PostMessageManager from '@team-monolith/post-message-manager';
+import PostMessageManager from "@team-monolith/post-message-manager";
 
 // 인스턴스 생성 (기본 타임아웃: 3000ms)
 const manager = new PostMessageManager();
@@ -37,41 +37,41 @@ const manager = new PostMessageManager(5000); // 5초
 ```typescript
 // 기본 등록
 manager.register({
-  messageType: 'getUserInfo',
+  messageType: "getUserInfo",
   callback: (payload) => {
-    console.log('받은 데이터:', payload);
-    return { name: 'John', age: 30 };
-  }
+    console.log("받은 데이터:", payload);
+    return { name: "John", age: 30 };
+  },
 });
 
 // origin 검증과 함께 등록
 manager.register({
-  messageType: 'sensitiveData',
+  messageType: "sensitiveData",
   callback: (payload) => {
-    return { secret: 'data' };
+    return { secret: "data" };
   },
-  origin: 'https://trusted-domain.com' // 특정 origin만 허용
+  origin: "https://trusted-domain.com", // 특정 origin만 허용
 });
 
 // 함수형 origin 검증
 manager.register({
-  messageType: 'flexibleCheck',
+  messageType: "flexibleCheck",
   callback: (payload) => {
-    return { data: 'response' };
+    return { data: "response" };
   },
   origin: (origin) => {
     // 여러 도메인 허용
-    return origin.endsWith('.mycompany.com');
-  }
+    return origin.endsWith(".mycompany.com");
+  },
 });
 
 // 비동기 콜백
 manager.register({
-  messageType: 'fetchData',
+  messageType: "fetchData",
   callback: async (payload) => {
-    const data = await fetch('/api/data');
+    const data = await fetch("/api/data");
     return data.json();
-  }
+  },
 });
 ```
 
@@ -82,16 +82,16 @@ manager.register({
 ```typescript
 try {
   const response = await manager.send({
-    messageType: 'getUserInfo',
+    messageType: "getUserInfo",
     payload: { userId: 123 },
     target: iframe.contentWindow, // 메시지를 받을 window 객체
-    targetOrigin: 'https://example.com', // 타겟 origin
-    timeoutMs: 5000 // 선택적: 이 요청만의 타임아웃 설정
+    targetOrigin: "https://example.com", // 타겟 origin
+    timeoutMs: 5000, // 선택적: 이 요청만의 타임아웃 설정
   });
-  
-  console.log('응답:', response);
+
+  console.log("응답:", response);
 } catch (error) {
-  console.error('에러:', error); // 타임아웃 또는 기타 에러
+  console.error("에러:", error); // 타임아웃 또는 기타 에러
 }
 ```
 
@@ -101,17 +101,17 @@ try {
 
 ```typescript
 manager.notify({
-  messageType: 'logEvent',
-  payload: { event: 'button_clicked', timestamp: Date.now() },
+  messageType: "logEvent",
+  payload: { event: "button_clicked", timestamp: Date.now() },
   target: window.opener,
-  targetOrigin: 'https://example.com'
+  targetOrigin: "https://example.com",
 });
 ```
 
 ### 핸들러 제거
 
 ```typescript
-manager.unregister('getUserInfo');
+manager.unregister("getUserInfo");
 ```
 
 ## 실전 예제
@@ -119,68 +119,70 @@ manager.unregister('getUserInfo');
 ### 부모 윈도우와 iframe 간 통신
 
 **부모 윈도우 (parent.html)**
+
 ```typescript
-import PostMessageManager from '@team-monolith/post-message-manager';
+import PostMessageManager from "@team-monolith/post-message-manager";
 
 const manager = new PostMessageManager();
 
 // iframe에서 보내는 메시지 핸들러 등록
 manager.register({
-  messageType: 'requestUserData',
+  messageType: "requestUserData",
   callback: async (payload) => {
     const userData = await fetchUserData(payload.userId);
     return userData;
   },
-  origin: 'https://child-iframe.com'
+  origin: "https://child-iframe.com",
 });
 
 // iframe으로 메시지 보내기
-const iframe = document.getElementById('myIframe') as HTMLIFrameElement;
+const iframe = document.getElementById("myIframe") as HTMLIFrameElement;
 
 iframe.onload = async () => {
   try {
     const response = await manager.send({
-      messageType: 'initialize',
-      payload: { theme: 'dark', lang: 'ko' },
+      messageType: "initialize",
+      payload: { theme: "dark", lang: "ko" },
       target: iframe.contentWindow!,
-      targetOrigin: 'https://child-iframe.com'
+      targetOrigin: "https://child-iframe.com",
     });
-    console.log('iframe 초기화 완료:', response);
+    console.log("iframe 초기화 완료:", response);
   } catch (error) {
-    console.error('초기화 실패:', error);
+    console.error("초기화 실패:", error);
   }
 };
 ```
 
 **iframe (child.html)**
+
 ```typescript
-import PostMessageManager from '@team-monolith/post-message-manager';
+import PostMessageManager from "@team-monolith/post-message-manager";
 
 const manager = new PostMessageManager();
 
 // 부모로부터 초기화 메시지 받기
 manager.register({
-  messageType: 'initialize',
+  messageType: "initialize",
   callback: (payload) => {
     applyTheme(payload.theme);
     setLanguage(payload.lang);
-    return { status: 'initialized' };
+    return { status: "initialized" };
   },
-  origin: 'https://parent-site.com'
+  origin: "https://parent-site.com",
 });
 
 // 부모에게 사용자 데이터 요청
 async function loadUserData(userId: number) {
   try {
     const userData = await manager.send({
-      messageType: 'requestUserData',
+      messageType: "requestUserData",
       payload: { userId },
       target: window.parent,
-      targetOrigin: 'https://parent-site.com'
+      targetOrigin: "https://parent-site.com",
     });
     return userData;
   } catch (error) {
-    console.error('사용자 데이터 로드 실패:', error);
+    console.error("사용자 데이터 로드 실패:", error);
   }
 }
 ```
@@ -226,7 +228,7 @@ interface SendProps {
 응답을 기다리지 않고 메시지를 보냅니다.
 
 ```typescript
-type NotifyProps = Omit<SendProps, 'timeoutMs'>;
+type NotifyProps = Omit<SendProps, "timeoutMs">;
 ```
 
 ## 주의사항
@@ -238,19 +240,19 @@ type NotifyProps = Omit<SendProps, 'timeoutMs'>;
 ```typescript
 // ❌ 나쁜 예: origin 검증 없음
 manager.register({
-  messageType: 'sensitiveData',
+  messageType: "sensitiveData",
   callback: (payload) => {
-    return { creditCard: '1234-5678' };
-  }
+    return { creditCard: "1234-5678" };
+  },
 });
 
 // ✅ 좋은 예: origin 검증 있음
 manager.register({
-  messageType: 'sensitiveData',
+  messageType: "sensitiveData",
   callback: (payload) => {
-    return { creditCard: '1234-5678' };
+    return { creditCard: "1234-5678" };
   },
-  origin: 'https://trusted-site.com'
+  origin: "https://trusted-site.com",
 });
 ```
 
@@ -261,11 +263,11 @@ manager.register({
 ```typescript
 // 긴 작업의 경우 타임아웃을 늘림
 const response = await manager.send({
-  messageType: 'heavyComputation',
+  messageType: "heavyComputation",
   payload: data,
   target: worker,
-  targetOrigin: '*',
-  timeoutMs: 30000 // 30초
+  targetOrigin: "*",
+  timeoutMs: 30000, // 30초
 });
 ```
 
@@ -277,12 +279,12 @@ const response = await manager.send({
 // React 예제
 useEffect(() => {
   manager.register({
-    messageType: 'update',
-    callback: handleUpdate
+    messageType: "update",
+    callback: handleUpdate,
   });
-  
+
   return () => {
-    manager.unregister('update');
+    manager.unregister("update");
   };
 }, []);
 ```
@@ -296,6 +298,6 @@ npm run build
 # NPM용 빌드
 npm run build:npm
 
-# 브라우저용 빌드 (IIFE)
+# 브라우저용 빌드 (IIFE), dist/post-message-manager.js 생성
 npm run build:browser
 ```
