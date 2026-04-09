@@ -116,7 +116,10 @@ export class PostMessageManagerImpl implements PostMessageManager {
         messageType,
         payload: response,
       };
-      event.source?.postMessage(message, { targetOrigin: event.origin });
+      // srcdoc iframe의 origin은 "null"(opaque origin)이므로 postMessage의
+      // targetOrigin으로 사용할 수 없다. 이 경우 "*"로 대체한다.
+      const responseOrigin = event.origin === "null" ? "*" : event.origin;
+      event.source?.postMessage(message, { targetOrigin: responseOrigin });
     } else if (data.type === "response") {
       // response type의 message를 받으면, handler를 찾아서
       // resolve하고, handler를 삭제한다.
