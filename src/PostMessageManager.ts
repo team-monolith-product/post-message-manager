@@ -16,6 +16,53 @@ interface MessageResponse {
   payload: any;
 }
 
+// stream 계열 메시지 객체 구성입니다.
+// 스트림은 stream-open 으로 열리고, stream-chunk 가 0회 이상 흐른 뒤
+// stream-end(정상) 또는 stream-error(실패)로 닫힙니다.
+// 소비자는 stream-cancel 로 중단을 요청할 수 있습니다.
+interface StreamOpen {
+  type: "stream-open";
+  messageType: string;
+  id: string;
+  payload: any;
+}
+
+interface StreamChunk {
+  type: "stream-chunk";
+  messageType: string;
+  parentId: string;
+  seq: number;
+  payload: any;
+}
+
+interface StreamEnd {
+  type: "stream-end";
+  messageType: string;
+  parentId: string;
+}
+
+interface StreamError {
+  type: "stream-error";
+  messageType: string;
+  parentId: string;
+  payload: { name: string; message: string };
+}
+
+interface StreamCancel {
+  type: "stream-cancel";
+  messageType: string;
+  parentId: string;
+}
+
+type Message =
+  | MessageRequest
+  | MessageResponse
+  | StreamOpen
+  | StreamChunk
+  | StreamEnd
+  | StreamError
+  | StreamCancel;
+
 type RequestHandler = Pick<
   PostMessageManager.RegisterProps,
   "callback" | "origin"
@@ -24,6 +71,45 @@ type ResponseHandler = {
   resolve: (payload: any) => void;
   timer: ReturnType<typeof setTimeout>;
 } & Pick<MessageResponse, "type" | "parentId">;
+
+type StreamHandler = Pick<
+  PostMessageManager.RegisterStreamProps,
+  "callback" | "origin"
+>;
+
+// 소비자 측 활성 스트림 상태입니다.
+type StreamConsumer = {
+  buffer: any[];
+  done: boolean;
+  failure?: Error;
+  expectedSeq: number;
+  wake?: () => void;
+  idleTimer?: ReturnType<typeof setTimeout>;
+  bumpIdle: () => void;
+};
+
+function serializeError(e: unknown): { name: string; message: string } {
+  if (e instanceof Error) {
+    return { name: e.name, message: e.message };
+  }
+  return { name: "Error", message: String(e) };
+}
+
+// handler의 origin이 정의되어 있을 때, origin 체크를 합니다.
+function isOriginAllowed(
+  allowed: string | ((origin: string) => boolean) | undefined,
+  origin: string
+): boolean {
+  if (!allowed) {
+    return true;
+  }
+  if (typeof allowed === "string") {
+    // origin이 string일 때는 정확히 일치하는지 확인합니다.
+    return allowed === origin;
+  }
+  // origin이 함수일 때는 함수의 return 값이 true인지 확인합니다.
+  return allowed(origin);
+}
 
 export namespace PostMessageManager {
   export interface RegisterProps {
@@ -42,6 +128,38 @@ export namespace PostMessageManager {
     timeoutMs?: number;
   }
   export type NotifyProps = Omit<SendProps, "timeoutMs">;
+
+  /** 스트림 공급자가 청크를 밀어 넣는 컨트롤러입니다. */
+  export interface StreamController {
+    /** 청크 하나를 소비자에게 보냅니다. close/error 이후에는 무시됩니다. */
+    enqueue(chunk: any): void;
+    /** 스트림을 정상 종료합니다. */
+    close(): void;
+    /** 스트림을 에러로 종료합니다. */
+    error(e: unknown): void;
+    /** 소비자가 취소하면 abort 됩니다. 공급 측 자원 정리에 사용합니다. */
+    signal: AbortSignal;
+  }
+
+  export interface RegisterStreamProps {
+    messageType: string;
+    /** stream-open 을 받으면 호출됩니다. 반드시 close() 또는 error() 로
+     * 스트림을 닫아야 합니다 — 닫지 않으면 소비자 쪽 idle 타임아웃으로 끝납니다. */
+    callback: (
+      payload: any,
+      controller: StreamController
+    ) => Promise<void> | void;
+    origin?: string | ((origin: string) => boolean);
+  }
+
+  export interface StreamProps extends Omit<SendProps, "timeoutMs"> {
+    /** 소비자 측 취소 신호. abort 되면 공급자에게 stream-cancel 이 전달됩니다. */
+    signal?: AbortSignal;
+    /** 청크 사이 무활동 한도 (ms). 초과하면 스트림이 에러로 끝나고
+     * 공급자에게 stream-cancel 이 전달됩니다. 생략하면 생성자의 timeoutMs 를
+     * 사용합니다. */
+    idleTimeoutMs?: number;
+  }
 }
 
 /**
@@ -59,18 +177,33 @@ export namespace PostMessageManager {
  * register 함수를 이용하여 다른 window로부터 메시지를 받을 때, 어떤 callback 함수를 실행할지 등록할 수 있습니다.
  *  - 내부적으로 requestHandlers에 RequestHandler 타입의 객체를 저장합니다.
  * unregister 함수를 이용하여 등록된 callback 함수를 삭제할 수 있습니다.
+ *
+ * stream 함수를 이용하여 다른 window로부터 여러 청크의 응답을 순서대로 받을 수 있습니다.
+ *  - AsyncGenerator를 반환하며, for await...of 로 소비합니다.
+ *  - 루프를 중간에 벗어나거나 signal 을 abort 하면 공급자에게 취소(stream-cancel)가 전파됩니다.
+ *  - 청크 사이 무활동이 idleTimeoutMs 를 넘으면 에러로 끝납니다.
+ * registerStream 함수를 이용하여 스트림 요청을 받았을 때 청크를 공급할 callback을 등록합니다.
+ *  - callback은 controller 로 enqueue/close/error 하고, 소비자 취소는 controller.signal 로 받습니다.
  */
 export interface PostMessageManager {
   register(args: PostMessageManager.RegisterProps): void;
   unregister(messageType: string): void;
   send<T>(args: PostMessageManager.SendProps): Promise<T>;
   notify(args: PostMessageManager.NotifyProps): void;
+  registerStream(args: PostMessageManager.RegisterStreamProps): void;
+  unregisterStream(messageType: string): void;
+  stream<T = any>(
+    args: PostMessageManager.StreamProps
+  ): AsyncGenerator<T, void, void>;
 }
 
 export class PostMessageManagerImpl implements PostMessageManager {
   constructor(timeoutMs = 3000) {
     this.requestHandlers = {}; // key: messageType, value: RequestHandler
     this.responseHandlers = {}; // key: id, value: ResponseHandler
+    this.streamHandlers = {}; // key: messageType, value: StreamHandler
+    this.streamConsumers = {}; // key: id, value: StreamConsumer
+    this.streamProducers = {}; // key: id, value: AbortController
     this.timeoutMs = timeoutMs;
     this._init();
   }
@@ -79,9 +212,7 @@ export class PostMessageManagerImpl implements PostMessageManager {
     window.addEventListener("message", this._onMessage.bind(this));
   }
 
-  private async _onMessage(
-    event: MessageEvent<MessageResponse | MessageRequest>
-  ) {
+  private async _onMessage(event: MessageEvent<Message>) {
     const { data } = event;
 
     if (data.type === "request") {
@@ -92,19 +223,8 @@ export class PostMessageManagerImpl implements PostMessageManager {
         return;
       }
 
-      // handler의 origin이 정의되어 있을 때, origin 체크를 합니다.
-      if (handler.origin) {
-        if (typeof handler.origin === "string") {
-          // origin이 string일 때는 정확히 일치하는지 확인합니다.
-          if (handler.origin !== event.origin) {
-            return;
-          }
-        } else {
-          // origin이 함수일 때는 함수의 return 값이 true인지 확인합니다.
-          if (!handler.origin(event.origin)) {
-            return;
-          }
-        }
+      if (!isOriginAllowed(handler.origin, event.origin)) {
+        return;
       }
 
       // request message에 대해서는 항상 response message를 보낸다.
@@ -132,7 +252,124 @@ export class PostMessageManagerImpl implements PostMessageManager {
       handler.resolve(payload);
       clearTimeout(handler.timer);
       delete this.responseHandlers[parentId]; // response message를 받으면 handler를 삭제한다.
+    } else if (data.type === "stream-open") {
+      await this._onStreamOpen(event, data);
+    } else if (data.type === "stream-cancel") {
+      // 소비자의 취소를 공급자 callback 에 signal 로 전파한다.
+      const abortController = this.streamProducers[data.parentId];
+      if (!abortController) {
+        return;
+      }
+      delete this.streamProducers[data.parentId];
+      abortController.abort();
+    } else if (
+      data.type === "stream-chunk" ||
+      data.type === "stream-end" ||
+      data.type === "stream-error"
+    ) {
+      this._onStreamMessage(data);
     }
+  }
+
+  private async _onStreamOpen(event: MessageEvent<Message>, data: StreamOpen) {
+    const { messageType, payload, id } = data;
+    const handler = this.streamHandlers[messageType];
+    if (!handler) {
+      return;
+    }
+    if (!isOriginAllowed(handler.origin, event.origin)) {
+      return;
+    }
+
+    // srcdoc iframe의 origin은 "null"(opaque origin)이므로 "*"로 대체한다.
+    const targetOrigin = event.origin === "null" ? "*" : event.origin;
+    const source = event.source;
+    const abortController = new AbortController();
+    this.streamProducers[id] = abortController;
+
+    let seq = 0;
+    let closed = false;
+    const post = (message: StreamChunk | StreamEnd | StreamError) => {
+      source?.postMessage(message, { targetOrigin });
+    };
+    const finish = () => {
+      closed = true;
+      delete this.streamProducers[id];
+    };
+    // 소비자가 취소하면 이후의 enqueue/close/error 를 무시한다.
+    abortController.signal.addEventListener("abort", () => {
+      closed = true;
+    });
+
+    const controller: PostMessageManager.StreamController = {
+      enqueue: (chunk) => {
+        if (closed) {
+          return;
+        }
+        post({
+          type: "stream-chunk",
+          messageType,
+          parentId: id,
+          seq: seq++,
+          payload: chunk,
+        });
+      },
+      close: () => {
+        if (closed) {
+          return;
+        }
+        finish();
+        post({ type: "stream-end", messageType, parentId: id });
+      },
+      error: (e) => {
+        if (closed) {
+          return;
+        }
+        finish();
+        post({
+          type: "stream-error",
+          messageType,
+          parentId: id,
+          payload: serializeError(e),
+        });
+      },
+      signal: abortController.signal,
+    };
+
+    try {
+      await handler.callback(payload, controller);
+    } catch (e) {
+      // callback이 close/error 전에 던지면 에러로 종료한다.
+      controller.error(e);
+    }
+  }
+
+  private _onStreamMessage(data: StreamChunk | StreamEnd | StreamError) {
+    const consumer = this.streamConsumers[data.parentId];
+    if (!consumer) {
+      return;
+    }
+
+    if (data.type === "stream-chunk") {
+      if (data.seq !== consumer.expectedSeq) {
+        consumer.failure = new Error(
+          `Stream chunk out of order for ${data.messageType}: expected ${consumer.expectedSeq}, got ${data.seq}`
+        );
+        consumer.done = true;
+      } else {
+        consumer.expectedSeq += 1;
+        consumer.buffer.push(data.payload);
+        consumer.bumpIdle();
+      }
+    } else if (data.type === "stream-end") {
+      consumer.done = true;
+    } else {
+      const error = new Error(data.payload.message);
+      error.name = data.payload.name;
+      consumer.failure = error;
+      consumer.done = true;
+    }
+    consumer.wake?.();
   }
 
   register(args: PostMessageManager.RegisterProps) {
@@ -167,7 +404,7 @@ export class PostMessageManagerImpl implements PostMessageManager {
             `Timeout: no response for ${messageType} after ${timeoutMs}ms`
           )
         );
-        this.unregister(id);
+        delete this.responseHandlers[id];
       }, timeoutMs);
 
       const message: MessageRequest = {
@@ -198,7 +435,105 @@ export class PostMessageManagerImpl implements PostMessageManager {
     target.postMessage(message, targetOrigin);
   }
 
+  registerStream(args: PostMessageManager.RegisterStreamProps) {
+    const { messageType, callback, origin } = args;
+    if (this.streamHandlers[messageType]) {
+      console.warn(`Stream handler for ${messageType} is already registered`);
+    }
+    this.streamHandlers[messageType] = { callback, origin };
+  }
+
+  unregisterStream(messageType: string) {
+    delete this.streamHandlers[messageType];
+  }
+
+  stream<T = any>(
+    args: PostMessageManager.StreamProps
+  ): AsyncGenerator<T, void, void> {
+    const { messageType, payload, target, targetOrigin, signal, idleTimeoutMs } =
+      args;
+    const id = uid();
+    const idleMs = idleTimeoutMs ?? this.timeoutMs;
+    const consumers = this.streamConsumers;
+
+    const fail = (error: Error) => {
+      consumer.failure = error;
+      consumer.done = true;
+      consumer.wake?.();
+    };
+    const cancel = () => {
+      const message: StreamCancel = {
+        type: "stream-cancel",
+        messageType,
+        parentId: id,
+      };
+      target.postMessage(message, targetOrigin);
+    };
+
+    const consumer: StreamConsumer = {
+      buffer: [],
+      done: false,
+      expectedSeq: 0,
+      bumpIdle: () => {
+        clearTimeout(consumer.idleTimer);
+        consumer.idleTimer = setTimeout(() => {
+          cancel();
+          fail(
+            new Error(
+              `Timeout: no stream activity for ${messageType} after ${idleMs}ms`
+            )
+          );
+        }, idleMs);
+      },
+    };
+    consumers[id] = consumer;
+
+    const onAbort = () => {
+      cancel();
+      fail(new Error(`Aborted: stream for ${messageType} was cancelled`));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+
+    const open: StreamOpen = { type: "stream-open", messageType, id, payload };
+    target.postMessage(open, targetOrigin);
+    consumer.bumpIdle();
+
+    return (async function* () {
+      try {
+        for (;;) {
+          while (consumer.buffer.length === 0 && !consumer.done) {
+            await new Promise<void>((resolve) => {
+              consumer.wake = resolve;
+            });
+            consumer.wake = undefined;
+          }
+          while (consumer.buffer.length > 0) {
+            yield consumer.buffer.shift() as T;
+          }
+          if (consumer.done) {
+            if (consumer.failure) {
+              throw consumer.failure;
+            }
+            return;
+          }
+        }
+      } finally {
+        // 정상 종료·에러·소비자의 중도 이탈(break) 모두 여기를 지난다.
+        signal?.removeEventListener("abort", onAbort);
+        if (!consumer.done) {
+          // 소비자가 스트림이 끝나기 전에 끊은 경우 공급자에게 취소를 전파한다.
+          cancel();
+        }
+        clearTimeout(consumer.idleTimer);
+        delete consumers[id];
+      }
+    })();
+  }
+
   requestHandlers: Record<string, RequestHandler>;
   responseHandlers: Record<string, ResponseHandler>;
+  streamHandlers: Record<string, StreamHandler>;
+  streamConsumers: Record<string, StreamConsumer>;
+  streamProducers: Record<string, AbortController>;
   timeoutMs: number;
 }
