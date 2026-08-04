@@ -239,10 +239,7 @@ export class PostMessageManagerImpl implements PostMessageManager {
         messageType,
         payload: response,
       };
-      // srcdoc iframe의 origin은 "null"(opaque origin)이므로 postMessage의
-      // targetOrigin으로 사용할 수 없다. 이 경우 "*"로 대체한다.
-      const responseOrigin = event.origin === "null" ? "*" : event.origin;
-      event.source?.postMessage(message, { targetOrigin: responseOrigin });
+      this._replyTo(event)(message);
     } else if (data.type === "response") {
       // response type의 message를 받으면, handler를 찾아서
       // resolve하고, handler를 삭제한다.
@@ -274,6 +271,17 @@ export class PostMessageManagerImpl implements PostMessageManager {
     }
   }
 
+  // 받은 이벤트의 발신 창으로 메시지를 돌려보내는 함수를 만든다.
+  // srcdoc iframe의 origin은 "null"(opaque origin)이므로 postMessage의
+  // targetOrigin으로 사용할 수 없다. 이 경우 "*"로 대체한다.
+  private _replyTo(event: MessageEvent<Message>): (message: Message) => void {
+    const targetOrigin = event.origin === "null" ? "*" : event.origin;
+    const source = event.source;
+    return (message) => {
+      source?.postMessage(message, { targetOrigin });
+    };
+  }
+
   private async _onStreamOpen(event: MessageEvent<Message>, data: StreamOpen) {
     const { messageType, payload, id } = data;
     const handler = this.streamHandlers[messageType];
@@ -284,17 +292,12 @@ export class PostMessageManagerImpl implements PostMessageManager {
       return;
     }
 
-    // srcdoc iframe의 origin은 "null"(opaque origin)이므로 "*"로 대체한다.
-    const targetOrigin = event.origin === "null" ? "*" : event.origin;
-    const source = event.source;
     const abortController = new AbortController();
     this.streamProducers[id] = abortController;
 
     let seq = 0;
     let closed = false;
-    const post = (message: StreamChunk | StreamEnd | StreamError) => {
-      source?.postMessage(message, { targetOrigin });
-    };
+    const post = this._replyTo(event);
     const finish = () => {
       closed = true;
       delete this.streamProducers[id];
@@ -371,6 +374,13 @@ export class PostMessageManagerImpl implements PostMessageManager {
       error.name = data.payload.name;
       consumer.failure = error;
       consumer.done = true;
+    }
+    // 터미널 전이 시 즉시 제거해 "map 에 있다 ⟺ wire 에 살아있는 스트림"을
+    // 유지함. 제너레이터는 consumer 를 클로저로 직접 참조하므로 map 이 더
+    // 필요 없고, iterate 되지 않고 버려진 스트림도 여기서 정리됨.
+    if (consumer.done) {
+      clearTimeout(consumer.idleTimer);
+      delete this.streamConsumers[data.parentId];
     }
     consumer.wake?.();
   }
@@ -455,6 +465,13 @@ export class PostMessageManagerImpl implements PostMessageManager {
   ): AsyncGenerator<T, void, void> {
     const { messageType, payload, target, targetOrigin, signal, idleTimeoutMs } =
       args;
+    // 이미 abort 된 signal 은 abort 이벤트가 다시 발생하지 않으므로,
+    // stream-open 을 보내지 않고 즉시 실패한다.
+    if (signal?.aborted) {
+      return (async function* () {
+        throw new Error(`Aborted: stream for ${messageType} was cancelled`);
+      })();
+    }
     const id = uid();
     const idleMs = idleTimeoutMs ?? this.timeoutMs;
     const consumers = this.streamConsumers;
@@ -462,6 +479,8 @@ export class PostMessageManagerImpl implements PostMessageManager {
     const fail = (error: Error) => {
       consumer.failure = error;
       consumer.done = true;
+      clearTimeout(consumer.idleTimer);
+      delete consumers[id];
       consumer.wake?.();
     };
     const cancel = () => {
@@ -521,14 +540,15 @@ export class PostMessageManagerImpl implements PostMessageManager {
           }
         }
       } finally {
-        // 정상 종료·에러·소비자의 중도 이탈(break) 모두 여기를 지난다.
+        // 터미널 전이(end·error·seq·idle·abort)의 상태 정리는 각 전이 시점에
+        // 끝나 있으므로, 여기는 리스너 해제와 중도 이탈(break)만 맡는다.
         signal?.removeEventListener("abort", onAbort);
         if (!consumer.done) {
           // 소비자가 스트림이 끝나기 전에 끊은 경우 공급자에게 취소를 전파한다.
           cancel();
+          clearTimeout(consumer.idleTimer);
+          delete consumers[id];
         }
-        clearTimeout(consumer.idleTimer);
-        delete consumers[id];
       }
     })();
   }

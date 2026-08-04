@@ -73,6 +73,48 @@ describe("stream", () => {
     );
 
     expect(chunks).toEqual(["a", "b", "c"]);
+    expect(Object.keys(manager.streamConsumers)).toHaveLength(0);
+  });
+
+  it("이미 aborted 된 signal 이면 stream-open 없이 즉시 실패한다", async () => {
+    const callback = jest.fn();
+    manager.registerStream({ messageType: "stream:pre-aborted", callback });
+    const abortController = new AbortController();
+    abortController.abort();
+
+    await expect(
+      collect(
+        manager.stream({
+          messageType: "stream:pre-aborted",
+          payload: null,
+          signal: abortController.signal,
+          ...sendBase,
+        })
+      )
+    ).rejects.toThrow("Aborted");
+    expect(callback).not.toHaveBeenCalled();
+    expect(
+      sentMessages.filter(
+        (message) => message.messageType === "stream:pre-aborted"
+      )
+    ).toHaveLength(0);
+  });
+
+  it("iterate 하지 않고 버린 스트림도 idle 타임아웃 후 정리된다", async () => {
+    manager.registerStream({
+      messageType: "stream:orphan",
+      callback: () => {},
+    });
+
+    manager.stream({
+      messageType: "stream:orphan",
+      payload: null,
+      idleTimeoutMs: 20,
+      ...sendBase,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    expect(Object.keys(manager.streamConsumers)).toHaveLength(0);
   });
 
   it("공급자 에러가 name·message 를 보존해 throw 된다", async () => {
