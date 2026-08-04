@@ -86,6 +86,10 @@ type StreamConsumer = {
   wake?: () => void;
   idleTimer?: ReturnType<typeof setTimeout>;
   bumpIdle: () => void;
+  /** wire 발 종료(end·error). 상태 확정·타이머 해제·맵 제거·wake 를 수행합니다. */
+  finish: (failure?: Error) => void;
+  /** 소비자 발 종료(idle·abort·break·seq). 공급자에 취소 전파 후 finish 합니다. */
+  cancelAndFinish: (failure?: Error) => void;
 };
 
 function serializeError(e: unknown): { name: string; message: string } {
@@ -93,6 +97,12 @@ function serializeError(e: unknown): { name: string; message: string } {
     return { name: e.name, message: e.message };
   }
   return { name: "Error", message: String(e) };
+}
+
+function reviveError(payload: { name: string; message: string }): Error {
+  const error = new Error(payload.message);
+  error.name = payload.name;
+  return error;
 }
 
 // handler의 origin이 정의되어 있을 때, origin 체크를 합니다.
@@ -358,31 +368,23 @@ export class PostMessageManagerImpl implements PostMessageManager {
 
     if (data.type === "stream-chunk") {
       if (data.seq !== consumer.expectedSeq) {
-        consumer.failure = new Error(
-          `Stream chunk out of order for ${data.messageType}: expected ${consumer.expectedSeq}, got ${data.seq}`
+        // 방어 발동 시에도 공급자 자원이 남지 않도록 취소를 전파함.
+        consumer.cancelAndFinish(
+          new Error(
+            `Stream chunk out of order for ${data.messageType}: expected ${consumer.expectedSeq}, got ${data.seq}`
+          )
         );
-        consumer.done = true;
       } else {
         consumer.expectedSeq += 1;
         consumer.buffer.push(data.payload);
         consumer.bumpIdle();
+        consumer.wake?.();
       }
     } else if (data.type === "stream-end") {
-      consumer.done = true;
+      consumer.finish();
     } else {
-      const error = new Error(data.payload.message);
-      error.name = data.payload.name;
-      consumer.failure = error;
-      consumer.done = true;
+      consumer.finish(reviveError(data.payload));
     }
-    // 터미널 전이 시 즉시 제거해 "map 에 있다 ⟺ wire 에 살아있는 스트림"을
-    // 유지함. 제너레이터는 consumer 를 클로저로 직접 참조하므로 map 이 더
-    // 필요 없고, iterate 되지 않고 버려진 스트림도 여기서 정리됨.
-    if (consumer.done) {
-      clearTimeout(consumer.idleTimer);
-      delete this.streamConsumers[data.parentId];
-    }
-    consumer.wake?.();
   }
 
   register(args: PostMessageManager.RegisterProps) {
@@ -476,13 +478,6 @@ export class PostMessageManagerImpl implements PostMessageManager {
     const idleMs = idleTimeoutMs ?? this.timeoutMs;
     const consumers = this.streamConsumers;
 
-    const fail = (error: Error) => {
-      consumer.failure = error;
-      consumer.done = true;
-      clearTimeout(consumer.idleTimer);
-      delete consumers[id];
-      consumer.wake?.();
-    };
     const cancel = () => {
       const message: StreamCancel = {
         type: "stream-cancel",
@@ -499,20 +494,33 @@ export class PostMessageManagerImpl implements PostMessageManager {
       bumpIdle: () => {
         clearTimeout(consumer.idleTimer);
         consumer.idleTimer = setTimeout(() => {
-          cancel();
-          fail(
+          consumer.cancelAndFinish(
             new Error(
               `Timeout: no stream activity for ${messageType} after ${idleMs}ms`
             )
           );
         }, idleMs);
       },
+      // 터미널 전이 4단계를 한 곳에 모음. 맵에서 즉시 제거해
+      // "map 에 있다 ⟺ wire 에 살아있는 스트림"을 유지함.
+      finish: (failure?: Error) => {
+        consumer.failure = failure;
+        consumer.done = true;
+        clearTimeout(consumer.idleTimer);
+        delete consumers[id];
+        consumer.wake?.();
+      },
+      cancelAndFinish: (failure?: Error) => {
+        cancel();
+        consumer.finish(failure);
+      },
     };
     consumers[id] = consumer;
 
     const onAbort = () => {
-      cancel();
-      fail(new Error(`Aborted: stream for ${messageType} was cancelled`));
+      consumer.cancelAndFinish(
+        new Error(`Aborted: stream for ${messageType} was cancelled`)
+      );
     };
     signal?.addEventListener("abort", onAbort, { once: true });
 
@@ -540,14 +548,11 @@ export class PostMessageManagerImpl implements PostMessageManager {
           }
         }
       } finally {
-        // 터미널 전이(end·error·seq·idle·abort)의 상태 정리는 각 전이 시점에
-        // 끝나 있으므로, 여기는 리스너 해제와 중도 이탈(break)만 맡는다.
+        // 터미널 전이의 상태 정리는 각 전이 시점에 끝나 있으므로,
+        // 여기는 리스너 해제와 중도 이탈(break) 취소만 맡는다.
         signal?.removeEventListener("abort", onAbort);
         if (!consumer.done) {
-          // 소비자가 스트림이 끝나기 전에 끊은 경우 공급자에게 취소를 전파한다.
-          cancel();
-          clearTimeout(consumer.idleTimer);
-          delete consumers[id];
+          consumer.cancelAndFinish();
         }
       }
     })();

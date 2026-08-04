@@ -278,6 +278,12 @@ describe("stream", () => {
     );
 
     await expect(collect(iterator)).rejects.toThrow("out of order");
+    expect(
+      sentMessages.some(
+        (message) =>
+          message.type === "stream-cancel" && message.parentId === open.id
+      )
+    ).toBe(true);
   });
 
   it("악의적 parentId(__proto__)가 Object.prototype 을 오염시키지 못한다", async () => {
