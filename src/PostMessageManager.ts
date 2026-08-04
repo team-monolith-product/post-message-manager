@@ -199,11 +199,14 @@ export interface PostMessageManager {
 
 export class PostMessageManagerImpl implements PostMessageManager {
   constructor(timeoutMs = 3000) {
-    this.requestHandlers = {}; // key: messageType, value: RequestHandler
-    this.responseHandlers = {}; // key: id, value: ResponseHandler
-    this.streamHandlers = {}; // key: messageType, value: StreamHandler
-    this.streamConsumers = {}; // key: id, value: StreamConsumer
-    this.streamProducers = {}; // key: id, value: AbortController
+    // 메시지의 messageType·parentId 는 외부 창이 임의로 보낼 수 있는 값이라
+    // "__proto__" 등으로 Object.prototype 이 조회·오염되지 않도록
+    // 프로토타입 없는 객체를 사용함.
+    this.requestHandlers = Object.create(null); // key: messageType, value: RequestHandler
+    this.responseHandlers = Object.create(null); // key: id, value: ResponseHandler
+    this.streamHandlers = Object.create(null); // key: messageType, value: StreamHandler
+    this.streamConsumers = Object.create(null); // key: id, value: StreamConsumer
+    this.streamProducers = Object.create(null); // key: id, value: AbortController
     this.timeoutMs = timeoutMs;
     this._init();
   }

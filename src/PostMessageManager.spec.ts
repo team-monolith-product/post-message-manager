@@ -237,4 +237,24 @@ describe("stream", () => {
 
     await expect(collect(iterator)).rejects.toThrow("out of order");
   });
+
+  it("악의적 parentId(__proto__)가 Object.prototype 을 오염시키지 못한다", async () => {
+    for (const data of [
+      { type: "stream-end", messageType: "stream:evil", parentId: "__proto__" },
+      {
+        type: "stream-error",
+        messageType: "stream:evil",
+        parentId: "__proto__",
+        payload: { name: "Evil", message: "polluted" },
+      },
+    ]) {
+      window.dispatchEvent(
+        new MessageEvent("message", { data, origin: ORIGIN, source: window })
+      );
+    }
+    await Promise.resolve();
+
+    expect(({} as Record<string, unknown>).done).toBeUndefined();
+    expect(({} as Record<string, unknown>).failure).toBeUndefined();
+  });
 });
