@@ -100,6 +100,29 @@ describe("stream", () => {
     ).toHaveLength(0);
   });
 
+  it("스트림 종료 후의 abort 는 이미 확정된 정상 종료를 덮어쓰지 않는다", async () => {
+    manager.registerStream({
+      messageType: "stream:late-abort",
+      callback: (_payload, controller) => {
+        controller.enqueue("a");
+        controller.close();
+      },
+    });
+
+    const abortController = new AbortController();
+    const iterator = manager.stream({
+      messageType: "stream:late-abort",
+      payload: null,
+      signal: abortController.signal,
+      ...sendBase,
+    });
+    // 합성 postMessage 는 동기 dispatch 라 이 시점에 이미 stream-end 까지
+    // 도착해 있음 — 종료 확정 후의 abort 경합을 재현함.
+    abortController.abort();
+
+    await expect(collect(iterator)).resolves.toEqual(["a"]);
+  });
+
   it("iterate 하지 않고 버린 스트림도 idle 타임아웃 후 정리된다", async () => {
     manager.registerStream({
       messageType: "stream:orphan",

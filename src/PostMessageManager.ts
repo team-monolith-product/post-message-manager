@@ -503,7 +503,12 @@ export class PostMessageManagerImpl implements PostMessageManager {
       },
       // 터미널 전이 4단계를 한 곳에 모음. 맵에서 즉시 제거해
       // "map 에 있다 ⟺ wire 에 살아있는 스트림"을 유지함.
+      // 전이는 첫 번째만 유효함 — 종료 직후 abort 가 경합해도
+      // 이미 확정된 종료 원인을 덮어쓰지 않도록 함.
       finish: (failure?: Error) => {
+        if (consumer.done) {
+          return;
+        }
         consumer.failure = failure;
         consumer.done = true;
         clearTimeout(consumer.idleTimer);
@@ -511,6 +516,9 @@ export class PostMessageManagerImpl implements PostMessageManager {
         consumer.wake?.();
       },
       cancelAndFinish: (failure?: Error) => {
+        if (consumer.done) {
+          return;
+        }
         cancel();
         consumer.finish(failure);
       },
