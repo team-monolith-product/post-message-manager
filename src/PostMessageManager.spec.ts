@@ -4,7 +4,7 @@ const ORIGIN = "https://parent.example.com";
 
 // jsdom 의 window.postMessage 는 event.origin=""/event.source=null 로 이벤트를
 // 만들고 options 오버로드를 지원하지 않아 응답 경로가 끊긴다. 실브라우저처럼
-// origin·source 를 지정한 합성 MessageEvent 로 대체한다.
+// origin/source 를 지정한 합성 MessageEvent 로 대체한다.
 const sentMessages: any[] = [];
 beforeAll(() => {
   window.postMessage = ((message: unknown) => {
@@ -117,7 +117,7 @@ describe("stream", () => {
       ...sendBase,
     });
     // 합성 postMessage 는 동기 dispatch 라 이 시점에 이미 stream-end 까지
-    // 도착해 있음 — 종료 확정 후의 abort 경합을 재현함.
+    // 도착해 있어 종료 확정 후의 abort 경합을 재현함.
     abortController.abort();
 
     await expect(collect(iterator)).resolves.toEqual(["a"]);
@@ -140,7 +140,7 @@ describe("stream", () => {
     expect(Object.keys(manager.streamConsumers)).toHaveLength(0);
   });
 
-  it("공급자 에러가 name·message 를 보존해 throw 된다", async () => {
+  it("공급자 에러가 name/message 를 보존해 throw 된다", async () => {
     manager.registerStream({
       messageType: "stream:error",
       callback: (_payload, controller) => {
@@ -188,7 +188,6 @@ describe("stream", () => {
         producerSignal = controller.signal;
         controller.enqueue(1);
         controller.enqueue(2);
-        // close 하지 않는다 — 소비자 이탈로만 끝난다.
       },
     });
 
@@ -235,7 +234,6 @@ describe("stream", () => {
       callback: (_payload, controller) => {
         producerSignal = controller.signal;
         controller.enqueue(1);
-        // 이후 아무것도 보내지 않는다.
       },
     });
 
@@ -274,7 +272,6 @@ describe("stream", () => {
   });
 
   it("청크 seq 가 어긋나면 에러로 끝난다", async () => {
-    // 핸들러 없이 스트림을 열고, 잘못된 seq 의 청크를 직접 합성한다.
     const iterator = manager.stream({
       messageType: "stream:seq",
       payload: null,
