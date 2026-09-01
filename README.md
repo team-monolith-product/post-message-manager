@@ -108,10 +108,55 @@ manager.notify({
 });
 ```
 
+### 스트림 등록 및 소비
+
+`registerStream`으로 스트림 공급자를 등록하고 `stream`이 반환하는
+`AsyncGenerator`를 `for await...of`로 소비합니다.
+
+공급자 window:
+
+```typescript
+const provider = new PostMessageManager();
+
+provider.registerStream({
+  messageType: "progress",
+  callback: (_payload, controller) => {
+    for (const progress of [25, 50, 100]) {
+      if (controller.signal.aborted) {
+        return;
+      }
+      controller.enqueue(progress);
+    }
+    controller.close();
+  },
+});
+```
+
+소비자 window:
+
+```typescript
+const consumer = new PostMessageManager();
+
+for await (const progress of consumer.stream<number>({
+  messageType: "progress",
+  payload: null,
+  target: window.parent,
+  targetOrigin: "https://example.com",
+  idleTimeoutMs: 30000,
+})) {
+  console.log("진행률:", progress);
+}
+```
+
+루프를 중간에 끝내거나 `AbortSignal`을 abort하면 공급자의
+`controller.signal`도 abort됩니다. `idleTimeoutMs` 동안 청크가 없으면
+스트림이 에러로 끝나고 공급자에 취소가 전달됩니다.
+
 ### 핸들러 제거
 
 ```typescript
 manager.unregister("getUserInfo");
+provider.unregisterStream("progress");
 ```
 
 ## 실전 예제
@@ -230,6 +275,21 @@ interface SendProps {
 ```typescript
 type NotifyProps = Omit<SendProps, "timeoutMs">;
 ```
+
+### `registerStream(args: RegisterStreamProps): void`
+
+스트림 공급자를 등록합니다. callback은 `enqueue`, `close`, `error`,
+`signal`을 제공하는 controller를 받습니다.
+
+### `unregisterStream(messageType: string): void`
+
+등록된 스트림 공급자를 제거합니다.
+
+### `stream<T>(args: StreamProps): AsyncGenerator<T, void, void>`
+
+다른 window에 스트림을 요청하고 청크를 순서대로 소비하는
+`AsyncGenerator`를 반환합니다. `signal`과 `idleTimeoutMs`로 취소 조건을
+설정할 수 있습니다.
 
 ## 주의사항
 
