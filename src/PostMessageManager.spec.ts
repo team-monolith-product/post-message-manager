@@ -1,4 +1,4 @@
-import { PostMessageManagerImpl } from "./PostMessageManager";
+import { PostMessageManager, PostMessageManagerImpl } from "./PostMessageManager";
 
 const ORIGIN = "https://parent.example.com";
 
@@ -28,6 +28,25 @@ async function collect<T>(iterator: AsyncGenerator<T>): Promise<T[]> {
     chunks.push(chunk);
   }
   return chunks;
+}
+
+function latestStreamOpen(messageType: string): { id: string } {
+  const message = [...sentMessages]
+    .reverse()
+    .find(
+      (candidate) =>
+        candidate.type === "stream-open" && candidate.messageType === messageType
+    );
+  if (!message) {
+    throw new Error(`stream-open not found for ${messageType}`);
+  }
+  return message;
+}
+
+function dispatchStreamMessage(data: any) {
+  window.dispatchEvent(
+    new MessageEvent("message", { data, origin: ORIGIN, source: window })
+  );
 }
 
 describe("send/notify 하위호환", () => {
@@ -73,6 +92,65 @@ describe("stream", () => {
     );
 
     expect(chunks).toEqual(["a", "b", "c"]);
+    expect(Object.keys(manager.streamConsumers)).toHaveLength(0);
+  });
+
+  it("같은 messageType 의 동시 스트림도 id 별로 분리한다", async () => {
+    const controllers: Record<string, PostMessageManager.StreamController> =
+      Object.create(null);
+    manager.registerStream({
+      messageType: "stream:parallel",
+      callback: (payload, controller) => {
+        controllers[payload] = controller;
+      },
+    });
+
+    const left = manager.stream<string>({
+      messageType: "stream:parallel",
+      payload: "left",
+      ...sendBase,
+    });
+    const right = manager.stream<string>({
+      messageType: "stream:parallel",
+      payload: "right",
+      ...sendBase,
+    });
+
+    controllers.right.enqueue("right-1");
+    controllers.left.enqueue("left-1");
+    controllers.right.close();
+    controllers.left.close();
+
+    await expect(Promise.all([collect(left), collect(right)])).resolves.toEqual([
+      ["left-1"],
+      ["right-1"],
+    ]);
+    expect(Object.keys(manager.streamConsumers)).toHaveLength(0);
+    expect(Object.keys(manager.streamProducers)).toHaveLength(0);
+  });
+
+  it("error 전에 받은 청크는 전달한 뒤 name/message 를 보존해 throw 한다", async () => {
+    manager.registerStream({
+      messageType: "stream:chunk-then-error",
+      callback: (_payload, controller) => {
+        const error = new Error("boom after chunk");
+        error.name = "CustomError";
+        controller.enqueue("first");
+        controller.error(error);
+      },
+    });
+
+    const iterator = manager.stream<string>({
+      messageType: "stream:chunk-then-error",
+      payload: null,
+      ...sendBase,
+    });
+
+    await expect(iterator.next()).resolves.toEqual({ value: "first", done: false });
+    await expect(iterator.next()).rejects.toMatchObject({
+      name: "CustomError",
+      message: "boom after chunk",
+    });
     expect(Object.keys(manager.streamConsumers)).toHaveLength(0);
   });
 
@@ -180,6 +258,27 @@ describe("stream", () => {
     ).rejects.toThrow("supplier crashed");
   });
 
+  it("async callback 의 reject 도 stream-error 로 끝난다", async () => {
+    manager.registerStream({
+      messageType: "stream:async-throw",
+      callback: async () => {
+        await Promise.resolve();
+        throw new Error("async supplier crashed");
+      },
+    });
+
+    await expect(
+      collect(
+        manager.stream({
+          messageType: "stream:async-throw",
+          payload: null,
+          ...sendBase,
+        })
+      )
+    ).rejects.toThrow("async supplier crashed");
+    expect(Object.keys(manager.streamProducers)).toHaveLength(0);
+  });
+
   it("소비자가 루프를 벗어나면 공급자 signal 이 abort 된다", async () => {
     let producerSignal: AbortSignal | undefined;
     manager.registerStream({
@@ -201,6 +300,44 @@ describe("stream", () => {
     }
 
     expect(producerSignal?.aborted).toBe(true);
+  });
+
+  it("소비자 취소 뒤 공급자의 late chunk 와 terminal 은 전송되지 않는다", async () => {
+    let producerSignal: AbortSignal | undefined;
+    manager.registerStream({
+      messageType: "stream:cancel-fence",
+      callback: (_payload, controller) => {
+        producerSignal = controller.signal;
+        controller.enqueue("first");
+        controller.signal.addEventListener("abort", () => {
+          controller.enqueue("late");
+          controller.close();
+          controller.error(new Error("late error"));
+        });
+      },
+    });
+
+    const iterator = manager.stream<string>({
+      messageType: "stream:cancel-fence",
+      payload: null,
+      ...sendBase,
+    });
+    const { id } = latestStreamOpen("stream:cancel-fence");
+
+    await expect(iterator.next()).resolves.toEqual({ value: "first", done: false });
+    await iterator.return();
+
+    const messages = sentMessages.filter((message) => message.parentId === id);
+    expect(producerSignal?.aborted).toBe(true);
+    expect(messages.filter((message) => message.type === "stream-chunk")).toEqual([
+      expect.objectContaining({ payload: "first", seq: 0 }),
+    ]);
+    expect(
+      messages.some(
+        (message) =>
+          message.type === "stream-end" || message.type === "stream-error"
+      )
+    ).toBe(false);
   });
 
   it("AbortSignal 로 취소하면 Aborted 로 끝나고 공급자에 전파된다", async () => {
@@ -271,6 +408,47 @@ describe("stream", () => {
     expect(callback).not.toHaveBeenCalled();
   });
 
+  it("origin predicate 가 허용한 stream-open 은 공급자에게 전달한다", async () => {
+    const callback = jest.fn((_payload, controller) => {
+      controller.enqueue("allowed");
+      controller.close();
+    });
+    manager.registerStream({
+      messageType: "stream:origin-predicate",
+      origin: (origin) => origin === ORIGIN,
+      callback,
+    });
+
+    await expect(
+      collect(
+        manager.stream({
+          messageType: "stream:origin-predicate",
+          payload: null,
+          ...sendBase,
+        })
+      )
+    ).resolves.toEqual(["allowed"]);
+    expect(callback).toHaveBeenCalledTimes(1);
+  });
+
+  it("unregisterStream 뒤 stream-open 은 공급자 callback 을 호출하지 않는다", async () => {
+    const callback = jest.fn();
+    manager.registerStream({ messageType: "stream:unregister", callback });
+    manager.unregisterStream("stream:unregister");
+
+    await expect(
+      collect(
+        manager.stream({
+          messageType: "stream:unregister",
+          payload: null,
+          idleTimeoutMs: 20,
+          ...sendBase,
+        })
+      )
+    ).rejects.toThrow("Timeout");
+    expect(callback).not.toHaveBeenCalled();
+  });
+
   it("청크 seq 가 어긋나면 에러로 끝난다", async () => {
     const iterator = manager.stream({
       messageType: "stream:seq",
@@ -304,6 +482,50 @@ describe("stream", () => {
           message.type === "stream-cancel" && message.parentId === open.id
       )
     ).toBe(true);
+  });
+
+  it("stream-end 뒤 도착한 chunk 와 error 는 결과를 바꾸지 않는다", async () => {
+    const messageType = "stream:late-wire";
+    const iterator = manager.stream({
+      messageType,
+      payload: null,
+      idleTimeoutMs: 1000,
+      ...sendBase,
+    });
+    const { id } = latestStreamOpen(messageType);
+
+    dispatchStreamMessage({ type: "stream-end", messageType, parentId: id });
+    dispatchStreamMessage({
+      type: "stream-chunk",
+      messageType,
+      parentId: id,
+      seq: 0,
+      payload: "late",
+    });
+    dispatchStreamMessage({
+      type: "stream-error",
+      messageType,
+      parentId: id,
+      payload: { name: "LateError", message: "late failure" },
+    });
+
+    await expect(collect(iterator)).resolves.toEqual([]);
+    expect(Object.keys(manager.streamConsumers)).toHaveLength(0);
+  });
+
+  it("생성자 timeoutMs 를 idleTimeoutMs 기본값으로 사용한다", async () => {
+    const shortTimeoutManager = new PostMessageManagerImpl(20);
+
+    await expect(
+      collect(
+        shortTimeoutManager.stream({
+          messageType: "stream:default-idle-timeout",
+          payload: null,
+          ...sendBase,
+        })
+      )
+    ).rejects.toThrow("Timeout: no stream activity");
+    expect(Object.keys(shortTimeoutManager.streamConsumers)).toHaveLength(0);
   });
 
   it("악의적 parentId(__proto__)가 Object.prototype 을 오염시키지 못한다", async () => {
