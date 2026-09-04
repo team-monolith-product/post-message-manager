@@ -63,10 +63,7 @@ export function serializeStreamError(error: unknown): StreamWire<never> {
   return {
     marker: STREAM_WIRE_MARKER,
     transport: "error",
-    error:
-      error instanceof Error
-        ? { name: error.name, message: error.message }
-        : { name: "Error", message: String(error) },
+    error: serializeError(error),
   };
 }
 
