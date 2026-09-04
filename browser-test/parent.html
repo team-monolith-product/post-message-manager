@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>PostMessageManager stream browser test</title>
+    <script src="/dist/post-message-manager.js"></script>
+  </head>
+  <body>
+    <pre id="result">running</pre>
+    <script>
+      const childOrigin = "http://127.0.0.1:4174";
+      const manager = new PostMessageManager.default(500);
+      let cancelled = false;
+
+      function supportsNativeTransfer() {
+        const channel = new MessageChannel();
+        const stream = new ReadableStream();
+        try {
+          channel.port1.postMessage(stream, [stream]);
+          return true;
+        } catch {
+          return false;
+        } finally {
+          channel.port1.close();
+          channel.port2.close();
+        }
+      }
+
+      manager.registerStream({
+        messageType: "browser:normal",
+        origin: childOrigin,
+        callback: () =>
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue("a");
+              controller.enqueue("b");
+              controller.close();
+            },
+          }),
+      });
+
+      manager.registerStream({
+        messageType: "browser:error",
+        origin: childOrigin,
+        callback: () =>
+          new ReadableStream({
+            start(controller) {
+              const error = new Error("browser failure");
+              error.name = "BrowserStreamError";
+              controller.error(error);
+            },
+          }),
+      });
+
+      manager.registerStream({
+        messageType: "browser:cancel",
+        origin: childOrigin,
+        callback: () =>
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue("first");
+            },
+            cancel() {
+              cancelled = true;
+            },
+          }),
+      });
+
+      window.__browserTest = { status: "running" };
+      window.addEventListener("message", (event) => {
+        if (
+          event.origin !== childOrigin ||
+          event.data?.type !== "browser-test-result"
+        ) {
+          return;
+        }
+        setTimeout(() => {
+          const result = {
+            ...event.data.result,
+            cancelled,
+            nativeTransferSupported: supportsNativeTransfer(),
+          };
+          result.passed =
+            JSON.stringify(result.normal) === JSON.stringify(["a", "b"]) &&
+            result.error?.name === "BrowserStreamError" &&
+            result.error?.message === "browser failure" &&
+            result.cancelled === true;
+          window.__browserTest = result;
+          document.querySelector("#result").textContent = JSON.stringify(
+            result,
+            null,
+            2
+          );
+          fetch("/browser-test/result", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(result),
+          });
+        }, 50);
+      });
+
+      const iframe = document.createElement("iframe");
+      iframe.src = `${childOrigin}/browser-test/child.html`;
+      document.body.appendChild(iframe);
+    </script>
+  </body>
+</html>
