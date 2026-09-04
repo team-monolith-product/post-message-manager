@@ -108,9 +108,15 @@ describe("stream transport", () => {
     });
 
     channel.port1.postMessage(wire, streamWireTransferList(wire));
-    await expect(
-      collect(readStreamWire<string>(await received).values())
-    ).resolves.toEqual(["native"]);
+    const reader = readStreamWire<string>(await received).getReader();
+    await expect(reader.read()).resolves.toEqual({
+      done: false,
+      value: "native",
+    });
+    await expect(reader.read()).resolves.toEqual({
+      done: true,
+      value: undefined,
+    });
     channel.port1.close();
     channel.port2.close();
   });
@@ -252,7 +258,7 @@ describe("stream transport", () => {
   });
 
   it("does not send a request for an already aborted signal", async () => {
-    const callback = jest.fn();
+    const callback = jest.fn(() => new ReadableStream<never>());
     manager.registerStream({
       messageType: "stream:pre-aborted",
       callback,
@@ -279,12 +285,12 @@ describe("stream transport", () => {
   });
 
   it("cancels a stream that arrives after the opening request is aborted", async () => {
-    const cancelled = jest.fn();
+    const cancelled = jest.fn<(reason?: unknown) => void>();
     let resolveSource!: (source: ReadableStream<string>) => void;
     manager.registerStream({
       messageType: "stream:opening-abort",
       callback: () =>
-        new Promise((resolve) => {
+        new Promise<ReadableStream<string>>((resolve) => {
           resolveSource = resolve;
         }),
     });
@@ -303,7 +309,7 @@ describe("stream transport", () => {
     await expect(result).rejects.toMatchObject({ name: "AbortError" });
 
     resolveSource(
-      new ReadableStream({
+      new ReadableStream<string>({
         cancel: cancelled,
       })
     );
@@ -314,11 +320,11 @@ describe("stream transport", () => {
   });
 
   it("cancels the native source when the consumer stops early", async () => {
-    const cancelled = jest.fn();
+    const cancelled = jest.fn<(reason?: unknown) => void>();
     manager.registerStream({
       messageType: "stream:native-cancel",
       callback: () =>
-        new ReadableStream({
+        new ReadableStream<string>({
           start(controller) {
             controller.enqueue("first");
           },
@@ -340,12 +346,12 @@ describe("stream transport", () => {
   });
 
   it("cancels the fallback source when the consumer stops early", async () => {
-    const cancelled = jest.fn();
+    const cancelled = jest.fn<(reason?: unknown) => void>();
     manager.register({
       messageType: "stream:fallback-cancel",
       callback: () =>
         createStreamWire(
-          new ReadableStream({
+          new ReadableStream<string>({
             start(controller) {
               controller.enqueue("first");
             },
@@ -369,11 +375,11 @@ describe("stream transport", () => {
   });
 
   it("propagates AbortSignal cancellation to the source", async () => {
-    const cancelled = jest.fn();
+    const cancelled = jest.fn<(reason?: unknown) => void>();
     manager.registerStream({
       messageType: "stream:abort",
       callback: () =>
-        new ReadableStream({
+        new ReadableStream<string>({
           start(controller) {
             controller.enqueue("first");
           },
@@ -441,7 +447,7 @@ describe("stream transport", () => {
   });
 
   it("stops serving a stream after unregisterStream", async () => {
-    const callback = jest.fn();
+    const callback = jest.fn(() => new ReadableStream<never>());
     manager.registerStream({
       messageType: "stream:unregister",
       callback,
