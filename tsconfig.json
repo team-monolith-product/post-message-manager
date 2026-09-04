@@ -1,6 +1,7 @@
 {
   "compilerOptions": {
-    "target": "es2016",
+    "target": "es2018",
+    "lib": ["dom", "es2018", "esnext.asynciterable"],
     "module": "esnext",
     "moduleResolution": "node",
     "declaration": true,
@@ -11,5 +12,6 @@
     "strict": true,
     "skipLibCheck": true
   },
-  "include": ["src"]
+  "include": ["src"],
+  "exclude": ["**/*.spec.ts"]
 }

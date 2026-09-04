@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>PostMessageManager stream browser test child</title>
+    <script src="/dist/post-message-manager.js"></script>
+  </head>
+  <body>
+    <script>
+      const parentOrigin = "http://127.0.0.1:4173";
+      const manager = new PostMessageManager.default(500);
+      const request = {
+        payload: null,
+        target: window.parent,
+        targetOrigin: parentOrigin,
+      };
+
+      async function collect(messageType) {
+        const chunks = [];
+        for await (const chunk of manager.stream({ ...request, messageType })) {
+          chunks.push(chunk);
+        }
+        return chunks;
+      }
+
+      async function run() {
+        const normal = await collect("browser:normal");
+        let error;
+        try {
+          await collect("browser:error");
+        } catch (reason) {
+          error = { name: reason.name, message: reason.message };
+        }
+
+        for await (const chunk of manager.stream({
+          ...request,
+          messageType: "browser:cancel",
+        })) {
+          if (chunk === "first") {
+            break;
+          }
+        }
+
+        return { normal, error };
+      }
+
+      run()
+        .then((result) => {
+          window.parent.postMessage(
+            { type: "browser-test-result", result },
+            parentOrigin
+          );
+        })
+        .catch((reason) => {
+          window.parent.postMessage(
+            {
+              type: "browser-test-result",
+              result: {
+                fatal: { name: reason.name, message: reason.message },
+              },
+            },
+            parentOrigin
+          );
+        });
+    </script>
+  </body>
+</html>
