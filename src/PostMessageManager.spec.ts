@@ -278,6 +278,41 @@ describe("stream transport", () => {
     ).toBe(false);
   });
 
+  it("cancels a stream that arrives after the opening request is aborted", async () => {
+    const cancelled = jest.fn();
+    let resolveSource!: (source: ReadableStream<string>) => void;
+    manager.registerStream({
+      messageType: "stream:opening-abort",
+      callback: () =>
+        new Promise((resolve) => {
+          resolveSource = resolve;
+        }),
+    });
+    const abortController = new AbortController();
+    const result = collect(
+      manager.stream({
+        messageType: "stream:opening-abort",
+        payload: null,
+        signal: abortController.signal,
+        ...sendBase,
+      })
+    );
+    await nextTask();
+
+    abortController.abort();
+    await expect(result).rejects.toMatchObject({ name: "AbortError" });
+
+    resolveSource(
+      new ReadableStream({
+        cancel: cancelled,
+      })
+    );
+    await nextTask();
+    await nextTask();
+
+    expect(cancelled).toHaveBeenCalledTimes(1);
+  });
+
   it("cancels the native source when the consumer stops early", async () => {
     const cancelled = jest.fn();
     manager.registerStream({
