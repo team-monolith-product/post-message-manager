@@ -42,6 +42,22 @@ export namespace PostMessageManager {
     timeoutMs?: number;
   }
   export type NotifyProps = Omit<SendProps, "timeoutMs">;
+
+  /**
+   * A stream handler returns the platform ReadableStream directly. The stream is
+   * transferred as the response payload, so its lifecycle and cancellation are
+   * handled by the Streams and postMessage APIs rather than a custom protocol.
+   */
+  export interface RegisterStreamProps<T = any> {
+    messageType: string;
+    callback: (payload: any) => ReadableStream<T> | Promise<ReadableStream<T>>;
+    origin?: string | ((origin: string) => boolean);
+  }
+
+  export type StreamProps = Omit<SendProps, "timeoutMs"> & {
+    /** Time to wait for the stream itself to be opened. */
+    timeoutMs?: number;
+  };
 }
 
 /**
@@ -65,6 +81,9 @@ export interface PostMessageManager {
   unregister(messageType: string): void;
   send<T>(args: PostMessageManager.SendProps): Promise<T>;
   notify(args: PostMessageManager.NotifyProps): void;
+  registerStream<T>(args: PostMessageManager.RegisterStreamProps<T>): void;
+  unregisterStream(messageType: string): void;
+  stream<T>(args: PostMessageManager.StreamProps): AsyncGenerator<T, void, void>;
 }
 
 export class PostMessageManagerImpl implements PostMessageManager {
@@ -119,7 +138,14 @@ export class PostMessageManagerImpl implements PostMessageManager {
       // srcdoc iframe의 origin은 "null"(opaque origin)이므로 postMessage의
       // targetOrigin으로 사용할 수 없다. 이 경우 "*"로 대체한다.
       const responseOrigin = event.origin === "null" ? "*" : event.origin;
-      event.source?.postMessage(message, { targetOrigin: responseOrigin });
+      const transfer =
+        typeof ReadableStream !== "undefined" && response instanceof ReadableStream
+          ? [response]
+          : [];
+      event.source?.postMessage(message, {
+        targetOrigin: responseOrigin,
+        transfer,
+      });
     } else if (data.type === "response") {
       // response type의 message를 받으면, handler를 찾아서
       // resolve하고, handler를 삭제한다.
@@ -167,7 +193,7 @@ export class PostMessageManagerImpl implements PostMessageManager {
             `Timeout: no response for ${messageType} after ${timeoutMs}ms`
           )
         );
-        this.unregister(id);
+        delete this.responseHandlers[id];
       }, timeoutMs);
 
       const message: MessageRequest = {
@@ -196,6 +222,34 @@ export class PostMessageManagerImpl implements PostMessageManager {
       messageType,
     };
     target.postMessage(message, targetOrigin);
+  }
+
+  registerStream<T>(args: PostMessageManager.RegisterStreamProps<T>) {
+    this.register(args);
+  }
+
+  unregisterStream(messageType: string) {
+    this.unregister(messageType);
+  }
+
+  stream<T>(args: PostMessageManager.StreamProps): AsyncGenerator<T, void, void> {
+    const manager = this;
+    return (async function* () {
+      const readable = await manager.send<ReadableStream<T>>(args);
+      const reader = readable.getReader();
+
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) {
+            return;
+          }
+          yield value;
+        }
+      } finally {
+        await reader.cancel();
+      }
+    })();
   }
 
   requestHandlers: Record<string, RequestHandler>;

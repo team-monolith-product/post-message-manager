@@ -114,6 +114,46 @@ manager.notify({
 manager.unregister("getUserInfo");
 ```
 
+### 스트림 등록 및 소비
+
+`registerStream`은 표준 `ReadableStream`을 반환합니다. 응답 stream은
+`postMessage` transfer로 소비자에게 전달되며, 소비자는 그대로
+`for await...of`로 읽습니다. 루프를 중간에 끝내면 표준 stream cancel이
+공급자 쪽 stream에 전달됩니다.
+
+공급자 window:
+
+```typescript
+provider.registerStream({
+  messageType: "progress",
+  callback: () =>
+    new ReadableStream({
+      start(controller) {
+        controller.enqueue(25);
+        controller.enqueue(50);
+        controller.enqueue(100);
+        controller.close();
+      },
+      cancel() {
+        // 소비자가 더 이상 데이터를 원하지 않을 때 자원을 정리합니다.
+      },
+    }),
+});
+```
+
+소비자 window:
+
+```typescript
+for await (const progress of consumer.stream<number>({
+  messageType: "progress",
+  payload: null,
+  target: window.parent,
+  targetOrigin: "https://example.com",
+})) {
+  console.log("진행률:", progress);
+}
+```
+
 ## 실전 예제
 
 ### 부모 윈도우와 iframe 간 통신
@@ -230,6 +270,19 @@ interface SendProps {
 ```typescript
 type NotifyProps = Omit<SendProps, "timeoutMs">;
 ```
+
+### `registerStream<T>(args: RegisterStreamProps<T>): void`
+
+`ReadableStream<T>`을 반환하는 공급자를 등록합니다. 반환한 stream은 응답과
+함께 transfer 됩니다.
+
+### `unregisterStream(messageType: string): void`
+
+스트림 공급자를 제거합니다.
+
+### `stream<T>(args: StreamProps): AsyncGenerator<T, void, void>`
+
+다른 window의 `ReadableStream<T>`을 요청해 async generator로 소비합니다.
 
 ## 주의사항
 
