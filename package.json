@@ -9,11 +9,13 @@
     "build": "npm run clean && npm run build:npm && npm run build:browser",
     "build:npm": "tsc",
     "build:browser": "esbuild src/index.ts --bundle --outfile=dist/post-message-manager.js --format=iife --global-name=PostMessageManager --minify",
-    "test": "NODE_OPTIONS=--experimental-vm-modules jest",
+    "test": "npm run test:typecheck && NODE_OPTIONS=--experimental-vm-modules jest",
+    "test:typecheck": "tsc --project tsconfig.test.json",
     "test:browser:serve": "node browser-test/server.mjs"
   },
   "devDependencies": {
     "@types/jest": "^30.0.0",
+    "@types/node": "^26.0.0",
     "esbuild": "^0.25.11",
     "jest": "^30.4.2",
     "jest-environment-jsdom": "^30.4.1",
