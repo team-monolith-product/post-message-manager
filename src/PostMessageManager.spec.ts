@@ -10,7 +10,6 @@ import {
   createStreamWire,
   readStreamWire,
   streamWireTransferList,
-  supportsNativeStreamTransfer,
 } from "./StreamTransport";
 
 const ORIGIN = "https://parent.example.com";
@@ -88,20 +87,15 @@ describe("request/response compatibility", () => {
 });
 
 describe("stream transport", () => {
-  it("detects native transferable stream support without a user-agent check", () => {
-    expect(supportsNativeStreamTransfer()).toBe(true);
-  });
-
   it("moves a native stream through an actual MessagePort transfer", async () => {
     const channel = new MessageChannel();
     const wire = createStreamWire(
-      new ReadableStream({
+      new ReadableStream<string>({
         start(controller) {
           controller.enqueue("native");
           controller.close();
         },
-      }),
-      true
+      })
     );
     const received = new Promise<unknown>((resolve) => {
       channel.port2.onmessage = (event) => resolve(event.data);
@@ -143,33 +137,6 @@ describe("stream transport", () => {
         })
       )
     ).resolves.toEqual(["a", "b"]);
-  });
-
-  it("transfers ordered chunks and closes through the MessagePort fallback", async () => {
-    manager.register({
-      messageType: "stream:fallback",
-      callback: () =>
-        createStreamWire(
-          new ReadableStream({
-            start(controller) {
-              controller.enqueue(1);
-              controller.enqueue(2);
-              controller.close();
-            },
-          }),
-          false
-        ),
-    });
-
-    await expect(
-      collect(
-        manager.stream({
-          messageType: "stream:fallback",
-          payload: null,
-          ...sendBase,
-        })
-      )
-    ).resolves.toEqual([1, 2]);
   });
 
   it("keeps concurrent streams isolated", async () => {
@@ -334,35 +301,6 @@ describe("stream transport", () => {
 
     for await (const chunk of manager.stream({
       messageType: "stream:native-cancel",
-      payload: null,
-      ...sendBase,
-    })) {
-      expect(chunk).toBe("first");
-      break;
-    }
-    await nextTask();
-
-    expect(cancelled).toHaveBeenCalledTimes(1);
-  });
-
-  it("cancels the fallback source when the consumer stops early", async () => {
-    const cancelled = jest.fn<(reason?: unknown) => void>();
-    manager.register({
-      messageType: "stream:fallback-cancel",
-      callback: () =>
-        createStreamWire(
-          new ReadableStream<string>({
-            start(controller) {
-              controller.enqueue("first");
-            },
-            cancel: cancelled,
-          }),
-          false
-        ),
-    });
-
-    for await (const chunk of manager.stream({
-      messageType: "stream:fallback-cancel",
       payload: null,
       ...sendBase,
     })) {
