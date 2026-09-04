@@ -108,6 +108,44 @@ manager.notify({
 });
 ```
 
+### 스트림 보내고 받기
+
+보내는 쪽은 `ReadableStream`을 반환하는 핸들러를 등록합니다.
+
+```typescript
+manager.registerStream<string>({
+  messageType: "generateText",
+  callback: ({ prompt }) =>
+    new ReadableStream({
+      start(controller) {
+        controller.enqueue(`${prompt}: first`);
+        controller.enqueue(`${prompt}: second`);
+        controller.close();
+      },
+    }),
+  origin: "https://trusted-site.com",
+});
+```
+
+받는 쪽은 `AsyncGenerator`를 순회합니다. 순회를 중단하거나 `AbortSignal`을 취소하면 보내는 쪽의 스트림도 취소됩니다.
+
+```typescript
+const controller = new AbortController();
+
+for await (const chunk of manager.stream<string>({
+  messageType: "generateText",
+  payload: { prompt: "hello" },
+  target: iframe.contentWindow!,
+  targetOrigin: "https://trusted-site.com",
+  signal: controller.signal,
+  timeoutMs: 5000,
+})) {
+  console.log(chunk);
+}
+```
+
+브라우저가 transferable `ReadableStream`을 지원하면 native 전송을 사용합니다. 지원하지 않으면 `remote-web-streams`의 `MessagePort` 전송을 사용합니다. 두 전송 방식은 동일한 공개 API와 오류 형식을 제공합니다.
+
 ### 핸들러 제거
 
 ```typescript
@@ -209,6 +247,22 @@ interface RegisterProps {
 
 등록된 메시지 핸들러를 제거합니다.
 
+### `registerStream<T>(args: RegisterStreamProps<T>): void`
+
+`ReadableStream`을 반환하는 스트림 핸들러를 등록합니다.
+
+```typescript
+interface RegisterStreamProps<T> {
+  messageType: string;
+  callback: (payload: any) => ReadableStream<T> | Promise<ReadableStream<T>>;
+  origin?: string | ((origin: string) => boolean);
+}
+```
+
+### `unregisterStream(messageType: string): void`
+
+등록된 스트림 핸들러를 제거합니다.
+
 ### `send<T>(args: SendProps): Promise<T>`
 
 메시지를 보내고 응답을 기다립니다.
@@ -230,6 +284,18 @@ interface SendProps {
 ```typescript
 type NotifyProps = Omit<SendProps, "timeoutMs">;
 ```
+
+### `stream<T>(args: StreamProps): AsyncGenerator<T, void, void>`
+
+원격 스트림을 열고 chunk를 순서대로 반환합니다.
+
+```typescript
+interface StreamProps extends SendProps {
+  signal?: AbortSignal;
+}
+```
+
+`timeoutMs`는 스트림이 열릴 때까지 기다리는 시간입니다. 스트림이 열린 뒤 chunk 사이의 시간에는 적용되지 않습니다.
 
 ## 주의사항
 
