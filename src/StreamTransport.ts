@@ -1,5 +1,3 @@
-import { RemoteWritableStream, fromReadablePort } from "remote-web-streams";
-
 const STREAM_WIRE_MARKER = "post-message-manager-stream-v1";
 
 type SerializedError = {
@@ -19,96 +17,36 @@ export type StreamWire<T> =
     }
   | {
       marker: typeof STREAM_WIRE_MARKER;
-      transport: "message-port";
-      port: MessagePort;
-    }
-  | {
-      marker: typeof STREAM_WIRE_MARKER;
       transport: "error";
       error: SerializedError;
     };
-
-let nativeTransferSupport: boolean | undefined;
-
-export function supportsNativeStreamTransfer(): boolean {
-  if (nativeTransferSupport !== undefined) {
-    return nativeTransferSupport;
-  }
-
-  if (
-    typeof ReadableStream === "undefined" ||
-    typeof MessageChannel === "undefined"
-  ) {
-    nativeTransferSupport = false;
-    return nativeTransferSupport;
-  }
-
-  const channel = new MessageChannel();
-  const stream = new ReadableStream();
-
-  try {
-    channel.port1.postMessage(stream, [stream]);
-    nativeTransferSupport = true;
-  } catch {
-    nativeTransferSupport = false;
-  } finally {
-    channel.port1.close();
-    channel.port2.close();
-  }
-
-  return nativeTransferSupport;
-}
 
 export function serializeStreamError(error: unknown): StreamWire<never> {
   return {
     marker: STREAM_WIRE_MARKER,
     transport: "error",
-    error:
-      error instanceof Error
-        ? { name: error.name, message: error.message }
-        : { name: "Error", message: String(error) },
+    error: serializeError(error),
   };
 }
 
 export function createStreamWire<T>(
-  source: ReadableStream<T>,
-  useNativeTransfer = supportsNativeStreamTransfer()
+  source: ReadableStream<T>
 ): StreamWire<T> {
   if (!(source instanceof ReadableStream)) {
     throw new TypeError("Stream handler must return a ReadableStream");
   }
 
-  const framed = frameStream(source);
-  if (useNativeTransfer) {
-    return {
-      marker: STREAM_WIRE_MARKER,
-      transport: "native",
-      stream: framed,
-    };
-  }
-
-  const { writable, readablePort } =
-    new RemoteWritableStream<StreamFrame<T>>();
-  void framed.pipeTo(writable).catch(() => undefined);
-
   return {
     marker: STREAM_WIRE_MARKER,
-    transport: "message-port",
-    port: readablePort,
+    transport: "native",
+    stream: frameStream(source),
   };
 }
 
 export function streamWireTransferList(wire: unknown): Transferable[] {
-  if (!isStreamWire(wire)) {
-    return [];
-  }
-  if (wire.transport === "native") {
-    return [wire.stream];
-  }
-  if (wire.transport === "message-port") {
-    return [wire.port];
-  }
-  return [];
+  return isStreamWire(wire) && wire.transport === "native"
+    ? [wire.stream]
+    : [];
 }
 
 export function readStreamWire<T>(wire: unknown): ReadableStream<T> {
@@ -118,13 +56,8 @@ export function readStreamWire<T>(wire: unknown): ReadableStream<T> {
   if (wire.transport === "native") {
     return unframeStream(wire.stream as ReadableStream<StreamFrame<T>>);
   }
-  if (wire.transport === "message-port") {
-    return unframeStream(fromReadablePort<StreamFrame<T>>(wire.port));
-  }
 
-  const error = new Error(wire.error.message);
-  error.name = wire.error.name;
-  throw error;
+  throw reviveError(wire.error);
 }
 
 function frameStream<T>(source: ReadableStream<T>): ReadableStream<StreamFrame<T>> {
@@ -201,9 +134,6 @@ function isStreamWire(value: unknown): value is StreamWire<unknown> {
 
   if (value.transport === "native") {
     return "stream" in value && value.stream instanceof ReadableStream;
-  }
-  if (value.transport === "message-port") {
-    return "port" in value;
   }
   return (
     value.transport === "error" &&

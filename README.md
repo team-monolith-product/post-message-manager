@@ -144,7 +144,7 @@ for await (const chunk of manager.stream<string>({
 }
 ```
 
-브라우저가 transferable `ReadableStream`을 지원하면 native 전송을 사용합니다. 지원하지 않으면 `remote-web-streams`의 `MessagePort` 전송을 사용합니다. 두 전송 방식은 동일한 공개 API와 오류 형식을 제공합니다.
+스트림 응답은 transferable `ReadableStream`으로 전송합니다. 보내는 쪽과 받는 쪽은 같은 공개 API와 오류 형식을 사용합니다.
 
 ### 핸들러 제거
 
