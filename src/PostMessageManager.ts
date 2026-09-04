@@ -252,16 +252,49 @@ export class PostMessageManagerImpl implements PostMessageManager {
         throw createAbortError(args.messageType);
       }
 
-      const readable = readStreamWire<T>(await manager.send(sendArgs));
-      const reader = readable.getReader();
+      let reader: ReadableStreamDefaultReader<T> | undefined;
       let abortError: Error | undefined;
+      let rejectOpening: ((reason: Error) => void) | undefined;
+      const openingAborted = signal
+        ? new Promise<never>((_, reject) => {
+            rejectOpening = reject;
+          })
+        : undefined;
       const onAbort = () => {
         abortError = createAbortError(args.messageType);
-        void reader.cancel(abortError);
+        if (reader) {
+          void reader.cancel(abortError);
+        } else {
+          rejectOpening?.(abortError);
+        }
       };
       signal?.addEventListener("abort", onAbort, { once: true });
 
       try {
+        const response = manager.send<unknown>(sendArgs);
+        let wire: unknown;
+        try {
+          wire = openingAborted
+            ? await Promise.race([response, openingAborted])
+            : await response;
+        } catch (error) {
+          if (abortError) {
+            void response
+              .then((lateWire) =>
+                readStreamWire<T>(lateWire).cancel(abortError)
+              )
+              .catch(() => undefined);
+          }
+          throw error;
+        }
+
+        reader = readStreamWire<T>(wire).getReader();
+        rejectOpening = undefined;
+        if (abortError) {
+          await reader.cancel(abortError);
+          throw abortError;
+        }
+
         for (;;) {
           const { done, value } = await reader.read();
           if (abortError) {
@@ -274,7 +307,7 @@ export class PostMessageManagerImpl implements PostMessageManager {
         }
       } finally {
         signal?.removeEventListener("abort", onAbort);
-        await reader.cancel();
+        await reader?.cancel();
       }
     })();
   }
