@@ -1,6 +1,6 @@
 {
   "name": "@team-monolith/post-message-manager",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "license": "ISC",
@@ -23,7 +23,6 @@
     "typescript": "^5.4.3"
   },
   "dependencies": {
-    "remote-web-streams": "^0.2.0",
     "uid": "^2.0.2"
   }
 }
