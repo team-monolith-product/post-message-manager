@@ -9,6 +9,11 @@
     <script>
       const parentOrigin = "http://127.0.0.1:4173";
       const manager = new PostMessageManager.default(500);
+      const uncaught = [];
+      window.addEventListener("error", (event) => uncaught.push(event.message));
+      window.addEventListener("unhandledrejection", (event) => {
+        uncaught.push(String(event.reason));
+      });
       const request = {
         payload: null,
         target: window.parent,
@@ -41,7 +46,32 @@
           }
         }
 
-        return { normal, error };
+        let openingTimeout = false;
+        try {
+          await manager.stream({
+            ...request, messageType: "browser:late", timeoutMs: 10,
+          }).next();
+        } catch (reason) {
+          openingTimeout = reason.message.includes("Timeout");
+        }
+        let cloneError;
+        try {
+          await collect("browser:clone-error");
+        } catch (reason) {
+          cloneError = { name: reason.name, message: reason.message };
+        }
+        let queuedCloseRuns = 0;
+        for (let i = 0; i < 10; i++) {
+          for await (const chunk of manager.stream({
+            ...request, messageType: "browser:queued-close",
+          })) {
+            if (chunk !== "first") { throw new Error("Unexpected first chunk"); }
+            break;
+          }
+          queuedCloseRuns++;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        return { normal, error, openingTimeout, cloneError, queuedCloseRuns, uncaught };
       }
 
       run()

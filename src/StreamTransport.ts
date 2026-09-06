@@ -29,9 +29,7 @@ export function serializeStreamError(error: unknown): StreamWire<never> {
   };
 }
 
-export function createStreamWire<T>(
-  source: ReadableStream<T>
-): StreamWire<T> {
+export function createStreamWire<T>(source: ReadableStream<T>): StreamWire<T> {
   if (!(source instanceof ReadableStream)) {
     throw new TypeError("Stream handler must return a ReadableStream");
   }
@@ -58,6 +56,17 @@ export function readStreamWire<T>(wire: unknown): ReadableStream<T> {
   }
 
   throw reviveError(wire.error);
+}
+
+export function discardStreamWire(wire: unknown): void {
+  if (!isStreamWire(wire) || wire.transport === "error") {
+    return;
+  }
+  try {
+    void readStreamWire(wire).cancel().catch(() => undefined);
+  } catch {
+    return;
+  }
 }
 
 function frameStream<T>(source: ReadableStream<T>): ReadableStream<StreamFrame<T>> {
@@ -110,7 +119,12 @@ function unframeStream<T>(
 }
 
 function serializeError(error: unknown): SerializedError {
-  return error instanceof Error
+  return typeof error === "object" &&
+    error !== null &&
+    "name" in error &&
+    typeof error.name === "string" &&
+    "message" in error &&
+    typeof error.message === "string"
     ? { name: error.name, message: error.message }
     : { name: "Error", message: String(error) };
 }

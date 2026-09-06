@@ -1,6 +1,7 @@
 import { uid } from "uid";
 import {
   createStreamWire,
+  discardStreamWire,
   readStreamWire,
   serializeStreamError,
   streamWireTransferList,
@@ -103,6 +104,8 @@ export interface PostMessageManager {
 }
 
 export class PostMessageManagerImpl implements PostMessageManager {
+  private readonly requestIdPrefix = `${uid()}:`;
+
   constructor(timeoutMs = 3000) {
     this.requestHandlers = Object.create(null);
     this.responseHandlers = Object.create(null);
@@ -153,6 +156,12 @@ export class PostMessageManagerImpl implements PostMessageManager {
       const { payload, parentId } = data;
       const handler = this.responseHandlers[parentId];
       if (!handler) {
+        if (
+          typeof parentId === "string" &&
+          parentId.startsWith(this.requestIdPrefix)
+        ) {
+          discardStreamWire(payload);
+        }
         return;
       }
       // payload가 undefined일 수 있다.
@@ -182,7 +191,7 @@ export class PostMessageManagerImpl implements PostMessageManager {
       targetOrigin,
       timeoutMs: timeoutMsArgs,
     } = args;
-    const id = uid();
+    const id = `${this.requestIdPrefix}${uid()}`;
 
     // args로 timeoutMs를 설정하면 그 값을 사용하고, 없으면 기본값을 사용합니다.
     const timeoutMs = timeoutMsArgs ?? this.timeoutMs;
@@ -218,7 +227,7 @@ export class PostMessageManagerImpl implements PostMessageManager {
     const { messageType, payload, target, targetOrigin } = args;
     const message: MessageRequest = {
       type: "request",
-      id: uid(),
+      id: `${this.requestIdPrefix}${uid()}`,
       payload,
       messageType,
     };
@@ -263,7 +272,7 @@ export class PostMessageManagerImpl implements PostMessageManager {
       const onAbort = () => {
         abortError = createAbortError(args.messageType);
         if (reader) {
-          void reader.cancel(abortError);
+          void reader.cancel(abortError).catch(() => undefined);
         } else {
           rejectOpening?.(abortError);
         }
@@ -291,7 +300,6 @@ export class PostMessageManagerImpl implements PostMessageManager {
         reader = readStreamWire<T>(wire).getReader();
         rejectOpening = undefined;
         if (abortError) {
-          await reader.cancel(abortError);
           throw abortError;
         }
 
@@ -307,7 +315,15 @@ export class PostMessageManagerImpl implements PostMessageManager {
         }
       } finally {
         signal?.removeEventListener("abort", onAbort);
-        await reader?.cancel();
+        try {
+          if (abortError) {
+            void reader?.cancel(abortError).catch(() => undefined);
+          } else {
+            await reader?.cancel();
+          }
+        } finally {
+          reader?.releaseLock();
+        }
       }
     })();
   }
