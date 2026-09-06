@@ -173,6 +173,30 @@ describe("stream transport", () => {
     ]);
   });
 
+  it(
+    "does not discard another manager's stream response",
+    async () => {
+      const consumer = new PostMessageManagerImpl();
+      const messageType = "stream:other-manager";
+      manager.register({
+        messageType,
+        callback: () =>
+          createStreamWire(new ReadableStream<string>({
+            start(controller) {
+              controller.enqueue("owned");
+              controller.close();
+            },
+          })),
+      });
+
+      await expect(collect(consumer.stream({
+        messageType,
+        payload: null,
+        ...sendBase,
+      }))).resolves.toEqual(["owned"]);
+    }
+  );
+
   it("preserves a stream error name and message", async () => {
     manager.registerStream({
       messageType: "stream:error",
@@ -284,6 +308,99 @@ describe("stream transport", () => {
     await nextTask();
 
     expect(cancelled).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([false, true])(
+    "cancels a late response after the opening timeout (aborted: %s)",
+    async (aborted) => {
+      const cancelled = jest.fn<(reason?: unknown) => void>();
+      let resolveSource!: (source: ReadableStream<string>) => void;
+      const messageType = `stream:late-timeout:${aborted}`;
+      manager.register({
+        messageType,
+        callback: async () =>
+          createStreamWire(
+            await new Promise<ReadableStream<string>>((resolve) => {
+              resolveSource = resolve;
+            })
+          ),
+      });
+
+      const abortController = new AbortController();
+      const result = collect(manager.stream({
+        messageType,
+        payload: null,
+        timeoutMs: 20,
+        signal: abortController.signal,
+        ...sendBase,
+      }));
+      if (aborted) {
+        await nextTask();
+        abortController.abort();
+        await expect(result).rejects.toMatchObject({ name: "AbortError" });
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      } else {
+        await expect(result).rejects.toThrow("Timeout");
+      }
+      resolveSource(new ReadableStream<string>({ cancel: cancelled }));
+      for (let i = 0; i < 10 && cancelled.mock.calls.length === 0; i++) {
+        await nextTask();
+      }
+
+      expect(Object.keys(manager.responseHandlers)).toHaveLength(0);
+      expect(cancelled).toHaveBeenCalledTimes(1);
+    }
+  );
+
+  it("preserves AbortError when the source rejects cancellation", async () => {
+    const cancelled = jest.fn(async () => {
+      throw new Error("cancel failed");
+    });
+    manager.registerStream({
+      messageType: "stream:cancel-rejection",
+      callback: () =>
+        new ReadableStream<string>({
+          start(controller) {
+            controller.enqueue("first");
+          },
+          cancel: cancelled,
+        }),
+    });
+    const abortController = new AbortController();
+    const iterator = manager.stream({
+      messageType: "stream:cancel-rejection",
+      payload: null,
+      signal: abortController.signal,
+      ...sendBase,
+    });
+    await iterator.next();
+    abortController.abort();
+    await expect(iterator.next()).rejects.toMatchObject({ name: "AbortError" });
+    await nextTask();
+    expect(cancelled).toHaveBeenCalledTimes(1);
+  });
+
+  it("settles abort without waiting for source cancellation to finish", async () => {
+    manager.registerStream({
+      messageType: "stream:pending-cancel",
+      callback: () =>
+        new ReadableStream<string>({
+          start(controller) {
+            controller.enqueue("first");
+          },
+          cancel: () => new Promise<void>(() => undefined),
+        }),
+    });
+    const abortController = new AbortController();
+    const iterator = manager.stream({
+      messageType: "stream:pending-cancel",
+      payload: null,
+      signal: abortController.signal,
+      ...sendBase,
+    });
+    await iterator.next();
+    abortController.abort();
+    await expect(iterator.next()).rejects.toMatchObject({ name: "AbortError" });
   });
 
   it("cancels the native source when the consumer stops early", async () => {
