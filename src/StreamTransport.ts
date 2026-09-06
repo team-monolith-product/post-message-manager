@@ -123,6 +123,17 @@ export function readStreamWire<T>(wire: unknown): ReadableStream<T> {
   throw reviveError(wire.error);
 }
 
+export function discardStreamWire(wire: unknown): void {
+  if (!isStreamWire(wire) || wire.transport === "error") {
+    return;
+  }
+  try {
+    void readStreamWire(wire).cancel().catch(() => undefined);
+  } catch {
+    return;
+  }
+}
+
 function frameStream<T>(source: ReadableStream<T>): ReadableStream<StreamFrame<T>> {
   const reader = source.getReader();
   return new ReadableStream<StreamFrame<T>>({
@@ -188,8 +199,10 @@ function createReadablePort<T>(source: ReadableStream<T>): MessagePort {
     }
     try {
       const result = await reader.read();
+      if (terminal) {
+        return;
+      }
       if (result.done) {
-        terminal = true;
         channel.port1.postMessage({ type: "close" } satisfies PortMessage<T>);
         close();
         return;
@@ -199,12 +212,15 @@ function createReadablePort<T>(source: ReadableStream<T>): MessagePort {
         chunk: result.value,
       } satisfies PortMessage<T>);
     } catch (error) {
-      terminal = true;
+      if (terminal) {
+        return;
+      }
       channel.port1.postMessage({
         type: "error",
         error: serializeError(error),
       } satisfies PortMessage<T>);
       close();
+      void reader.cancel(error).catch(() => undefined);
     }
   };
 
@@ -214,15 +230,14 @@ function createReadablePort<T>(source: ReadableStream<T>): MessagePort {
       return;
     }
     if (event.data.type === "cancel" && !terminal) {
-      terminal = true;
+      close();
       void reader
         .cancel(
           event.data.reason === undefined
             ? undefined
             : reviveError(event.data.reason)
         )
-        .catch(() => undefined)
-        .finally(close);
+        .catch(() => undefined);
     }
   };
 
@@ -230,15 +245,21 @@ function createReadablePort<T>(source: ReadableStream<T>): MessagePort {
 }
 
 function readFromPort<T>(port: MessagePort): ReadableStream<T> {
+  let terminal = false;
   return new ReadableStream<T>({
     start(controller) {
       port.onmessage = (event: MessageEvent<PortMessage<T>>) => {
+        if (terminal) {
+          return;
+        }
         if (event.data.type === "chunk") {
           controller.enqueue(event.data.chunk);
         } else if (event.data.type === "close") {
+          terminal = true;
           controller.close();
           port.close();
         } else if (event.data.type === "error") {
+          terminal = true;
           controller.error(reviveError(event.data.error));
           port.close();
         }
@@ -248,6 +269,7 @@ function readFromPort<T>(port: MessagePort): ReadableStream<T> {
       port.postMessage({ type: "pull" } satisfies PortMessage<T>);
     },
     cancel(reason) {
+      terminal = true;
       port.postMessage({
         type: "cancel",
         reason: reason === undefined ? undefined : serializeError(reason),
@@ -258,7 +280,12 @@ function readFromPort<T>(port: MessagePort): ReadableStream<T> {
 }
 
 function serializeError(error: unknown): SerializedError {
-  return error instanceof Error
+  return typeof error === "object" &&
+    error !== null &&
+    "name" in error &&
+    typeof error.name === "string" &&
+    "message" in error &&
+    typeof error.message === "string"
     ? { name: error.name, message: error.message }
     : { name: "Error", message: String(error) };
 }
