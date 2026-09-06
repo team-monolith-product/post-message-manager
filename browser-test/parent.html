@@ -11,6 +11,13 @@
       const childOrigin = "http://127.0.0.1:4174";
       const manager = new PostMessageManager.default(500);
       let cancelled = false;
+      let lateCancelled = false;
+      let cloneCancelled = false;
+      const uncaught = [];
+      window.addEventListener("error", (event) => uncaught.push(event.message));
+      window.addEventListener("unhandledrejection", (event) => {
+        uncaught.push(String(event.reason));
+      });
 
       function supportsNativeTransfer() {
         const channel = new MessageChannel();
@@ -67,6 +74,35 @@
       });
 
       window.__browserTest = { status: "running" };
+      manager.registerStream({
+        messageType: "browser:late",
+        origin: childOrigin,
+        callback: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 80));
+          return new ReadableStream({
+            cancel() { lateCancelled = true; },
+          });
+        },
+      });
+      manager.registerStream({
+        messageType: "browser:clone-error",
+        origin: childOrigin,
+        callback: () => new ReadableStream({
+          start(controller) { controller.enqueue(() => undefined); },
+          cancel() { cloneCancelled = true; },
+        }),
+      });
+      manager.registerStream({
+        messageType: "browser:queued-close",
+        origin: childOrigin,
+        callback: () => new ReadableStream({
+          start(controller) {
+            controller.enqueue("first");
+            controller.enqueue("queued");
+            controller.close();
+          },
+        }),
+      });
       window.addEventListener("message", (event) => {
         if (
           event.origin !== childOrigin ||
@@ -77,14 +113,24 @@
         setTimeout(() => {
           const result = {
             ...event.data.result,
+            userAgent: navigator.userAgent,
             cancelled,
+            lateCancelled,
+            cloneCancelled,
+            uncaught: [...uncaught, ...(event.data.result.uncaught ?? [])],
             nativeTransferSupported: supportsNativeTransfer(),
           };
           result.passed =
             JSON.stringify(result.normal) === JSON.stringify(["a", "b"]) &&
             result.error?.name === "BrowserStreamError" &&
             result.error?.message === "browser failure" &&
-            result.cancelled === true;
+            result.cancelled === true &&
+            result.lateCancelled === true &&
+            result.cloneCancelled === true &&
+            result.openingTimeout === true &&
+            result.cloneError?.name === "DataCloneError" &&
+            result.queuedCloseRuns === 10 &&
+            result.uncaught.length === 0;
           window.__browserTest = result;
           document.querySelector("#result").textContent = JSON.stringify(
             result,
@@ -96,7 +142,7 @@
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(result),
           });
-        }, 50);
+        }, 150);
       });
 
       const iframe = document.createElement("iframe");

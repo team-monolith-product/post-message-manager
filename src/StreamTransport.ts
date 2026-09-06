@@ -1,4 +1,4 @@
-import { RemoteWritableStream, fromReadablePort } from "remote-web-streams";
+import { fromReadablePort, fromWritablePort } from "remote-web-streams";
 
 const STREAM_WIRE_MARKER = "post-message-manager-stream-v1";
 
@@ -84,14 +84,10 @@ export function createStreamWire<T>(
     };
   }
 
-  const { writable, readablePort } =
-    new RemoteWritableStream<StreamFrame<T>>();
-  void framed.pipeTo(writable).catch(() => undefined);
-
   return {
     marker: STREAM_WIRE_MARKER,
     transport: "message-port",
-    port: readablePort,
+    port: createReadablePort(framed),
   };
 }
 
@@ -116,12 +112,21 @@ export function readStreamWire<T>(wire: unknown): ReadableStream<T> {
     return unframeStream(wire.stream as ReadableStream<StreamFrame<T>>);
   }
   if (wire.transport === "message-port") {
-    return unframeStream(fromReadablePort<StreamFrame<T>>(wire.port));
+    return unframeStream(readFromPort<StreamFrame<T>>(wire.port));
   }
 
-  const error = new Error(wire.error.message);
-  error.name = wire.error.name;
-  throw error;
+  throw reviveError(wire.error);
+}
+
+export function discardStreamWire(wire: unknown): void {
+  if (!isStreamWire(wire) || wire.transport === "error") {
+    return;
+  }
+  try {
+    void readStreamWire(wire).cancel().catch(() => undefined);
+  } catch {
+    return;
+  }
 }
 
 function frameStream<T>(source: ReadableStream<T>): ReadableStream<StreamFrame<T>> {
@@ -173,8 +178,63 @@ function unframeStream<T>(
   });
 }
 
+function createReadablePort<T>(source: ReadableStream<T>): MessagePort {
+  const channel = new MessageChannel();
+  const writable = fromWritablePort<T>(channel.port1);
+
+  void source.pipeTo(writable, { preventCancel: true }).catch((error) => {
+    channel.port1.postMessage({ type: "abort", reason: serializeError(error) });
+    channel.port1.close();
+    void source.cancel(error).catch(() => undefined);
+  });
+
+  return channel.port2;
+}
+
+function readFromPort<T>(port: MessagePort): ReadableStream<T> {
+  const reader = fromReadablePort<T>(port).getReader();
+  let terminal = false;
+
+  return new ReadableStream<T>(
+    {
+      async pull(controller) {
+        try {
+          const result = await reader.read();
+          if (terminal) {
+            return;
+          }
+          if (result.done) {
+            terminal = true;
+            controller.close();
+          } else {
+            controller.enqueue(result.value);
+          }
+        } catch (error) {
+          if (!terminal) {
+            terminal = true;
+            controller.error(reviveError(serializeError(error)));
+          }
+        }
+      },
+      cancel(reason) {
+        terminal = true;
+        port.onmessage = null;
+        return reader.cancel(
+          reason === undefined ? undefined : serializeError(reason)
+        );
+      },
+    },
+    { highWaterMark: 0 }
+  );
+}
+
 function serializeError(error: unknown): SerializedError {
-  return error instanceof Error
+  return typeof error === "object" &&
+    error !== null &&
+    "name" in error &&
+    typeof error.name === "string" &&
+    "message" in error &&
+    typeof error.message === "string"
     ? { name: error.name, message: error.message }
     : { name: "Error", message: String(error) };
 }
