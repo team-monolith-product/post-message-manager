@@ -1,162 +1,54 @@
-const STREAM_WIRE_MARKER = "post-message-manager-stream-v1";
+const STREAM_ERROR = "post-message-manager-stream-error";
 
 type SerializedError = {
   name: string;
   message: string;
 };
 
-type StreamFrame<T> =
-  | { type: "chunk"; chunk: T }
-  | { type: "error"; error: SerializedError };
+type StreamErrorWire = {
+  type: typeof STREAM_ERROR;
+  error: SerializedError;
+};
 
-export type StreamWire<T> =
-  | {
-      marker: typeof STREAM_WIRE_MARKER;
-      transport: "native";
-      stream: ReadableStream<StreamFrame<T>>;
-    }
-  | {
-      marker: typeof STREAM_WIRE_MARKER;
-      transport: "error";
-      error: SerializedError;
-    };
+type StreamWire<T> = ReadableStream<T> | StreamErrorWire;
 
-export function serializeStreamError(error: unknown): StreamWire<never> {
+export function serializeStreamError(error: unknown): StreamErrorWire {
+  const value = error instanceof Error ? error : new Error(String(error));
   return {
-    marker: STREAM_WIRE_MARKER,
-    transport: "error",
-    error: serializeError(error),
+    type: STREAM_ERROR,
+    error: { name: value.name, message: value.message },
   };
 }
 
 export function createStreamWire<T>(source: ReadableStream<T>): StreamWire<T> {
   if (!(source instanceof ReadableStream)) {
-    throw new TypeError("Stream handler must return a ReadableStream");
+    throw new TypeError("registerStream callback must return a ReadableStream");
   }
-
-  return {
-    marker: STREAM_WIRE_MARKER,
-    transport: "native",
-    stream: frameStream(source),
-  };
+  return source;
 }
 
-export function streamWireTransferList(wire: unknown): Transferable[] {
-  return isStreamWire(wire) && wire.transport === "native"
-    ? [wire.stream]
-    : [];
+export function streamWireTransferList<T>(
+  wire: StreamWire<T>
+): Transferable[] {
+  return wire instanceof ReadableStream ? [wire] : [];
 }
 
 export function readStreamWire<T>(wire: unknown): ReadableStream<T> {
-  if (!isStreamWire(wire)) {
-    throw new TypeError("Invalid stream response");
+  if (wire instanceof ReadableStream) {
+    return wire;
   }
-  if (wire.transport === "native") {
-    return unframeStream(wire.stream as ReadableStream<StreamFrame<T>>);
+  if (isStreamErrorWire(wire)) {
+    const error = new Error(wire.error.message);
+    error.name = wire.error.name;
+    throw error;
   }
-
-  throw reviveError(wire.error);
+  throw new TypeError("Invalid stream response");
 }
 
-export function discardStreamWire(wire: unknown): void {
-  if (!isStreamWire(wire) || wire.transport === "error") {
-    return;
-  }
-  try {
-    void readStreamWire(wire).cancel().catch(() => undefined);
-  } catch {
-    return;
-  }
-}
-
-function frameStream<T>(source: ReadableStream<T>): ReadableStream<StreamFrame<T>> {
-  const reader = source.getReader();
-  return new ReadableStream<StreamFrame<T>>({
-    async pull(controller) {
-      try {
-        const result = await reader.read();
-        if (result.done) {
-          controller.close();
-        } else {
-          controller.enqueue({ type: "chunk", chunk: result.value });
-        }
-      } catch (error) {
-        controller.enqueue({ type: "error", error: serializeError(error) });
-        controller.close();
-      }
-    },
-    cancel(reason) {
-      return reader.cancel(reason);
-    },
-  });
-}
-
-function unframeStream<T>(
-  source: ReadableStream<StreamFrame<T>>
-): ReadableStream<T> {
-  const reader = source.getReader();
-  return new ReadableStream<T>({
-    async pull(controller) {
-      try {
-        const result = await reader.read();
-        if (result.done) {
-          controller.close();
-        } else if (result.value.type === "chunk") {
-          controller.enqueue(result.value.chunk);
-        } else {
-          const error = reviveError(result.value.error);
-          await reader.cancel(error).catch(() => undefined);
-          controller.error(error);
-        }
-      } catch (error) {
-        controller.error(error);
-      }
-    },
-    cancel(reason) {
-      return reader.cancel(reason);
-    },
-  });
-}
-
-function serializeError(error: unknown): SerializedError {
-  return typeof error === "object" &&
-    error !== null &&
-    "name" in error &&
-    typeof error.name === "string" &&
-    "message" in error &&
-    typeof error.message === "string"
-    ? { name: error.name, message: error.message }
-    : { name: "Error", message: String(error) };
-}
-
-function reviveError(error: SerializedError): Error {
-  const result = new Error(error.message);
-  result.name = error.name;
-  return result;
-}
-
-function isStreamWire(value: unknown): value is StreamWire<unknown> {
-  if (
-    typeof value !== "object" ||
-    value === null ||
-    !("marker" in value) ||
-    value.marker !== STREAM_WIRE_MARKER ||
-    !("transport" in value)
-  ) {
-    return false;
-  }
-
-  if (value.transport === "native") {
-    return "stream" in value && value.stream instanceof ReadableStream;
-  }
+function isStreamErrorWire(value: unknown): value is StreamErrorWire {
   return (
-    value.transport === "error" &&
-    "error" in value &&
-    typeof value.error === "object" &&
-    value.error !== null &&
-    "name" in value.error &&
-    typeof value.error.name === "string" &&
-    "message" in value.error &&
-    typeof value.error.message === "string"
+    typeof value === "object" &&
+    value !== null &&
+    (value as StreamErrorWire).type === STREAM_ERROR
   );
 }

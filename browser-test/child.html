@@ -30,11 +30,11 @@
 
       async function run() {
         const normal = await collect("browser:normal");
-        let error;
+        let callbackError;
         try {
-          await collect("browser:error");
+          await collect("browser:callback-error");
         } catch (reason) {
-          error = { name: reason.name, message: reason.message };
+          callbackError = { name: reason.name, message: reason.message };
         }
 
         for await (const chunk of manager.stream({
@@ -46,32 +46,22 @@
           }
         }
 
-        let openingTimeout = false;
+        const abortController = new AbortController();
+        const iterator = manager.stream({
+          ...request,
+          messageType: "browser:abort",
+          signal: abortController.signal,
+        });
+        await iterator.next();
+        abortController.abort();
+        let abortError;
         try {
-          await manager.stream({
-            ...request, messageType: "browser:late", timeoutMs: 10,
-          }).next();
+          await iterator.next();
         } catch (reason) {
-          openingTimeout = reason.message.includes("Timeout");
-        }
-        let cloneError;
-        try {
-          await collect("browser:clone-error");
-        } catch (reason) {
-          cloneError = { name: reason.name, message: reason.message };
-        }
-        let queuedCloseRuns = 0;
-        for (let i = 0; i < 10; i++) {
-          for await (const chunk of manager.stream({
-            ...request, messageType: "browser:queued-close",
-          })) {
-            if (chunk !== "first") { throw new Error("Unexpected first chunk"); }
-            break;
-          }
-          queuedCloseRuns++;
+          abortError = { name: reason.name, message: reason.message };
         }
         await new Promise((resolve) => setTimeout(resolve, 30));
-        return { normal, error, openingTimeout, cloneError, queuedCloseRuns, uncaught };
+        return { normal, callbackError, abortError, uncaught };
       }
 
       run()

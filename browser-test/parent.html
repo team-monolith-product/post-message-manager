@@ -11,8 +11,7 @@
       const childOrigin = "http://127.0.0.1:4174";
       const manager = new PostMessageManager.default(500);
       let cancelled = false;
-      let lateCancelled = false;
-      let cloneCancelled = false;
+      let aborted = false;
       const uncaught = [];
       window.addEventListener("error", (event) => uncaught.push(event.message));
       window.addEventListener("unhandledrejection", (event) => {
@@ -47,16 +46,13 @@
       });
 
       manager.registerStream({
-        messageType: "browser:error",
+        messageType: "browser:callback-error",
         origin: childOrigin,
-        callback: () =>
-          new ReadableStream({
-            start(controller) {
-              const error = new Error("browser failure");
-              error.name = "BrowserStreamError";
-              controller.error(error);
-            },
-          }),
+        callback: () => {
+          const error = new Error("callback failed");
+          error.name = "CallbackError";
+          throw error;
+        },
       });
 
       manager.registerStream({
@@ -73,36 +69,21 @@
           }),
       });
 
+      manager.registerStream({
+        messageType: "browser:abort",
+        origin: childOrigin,
+        callback: () =>
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue("first");
+            },
+            cancel() {
+              aborted = true;
+            },
+          }),
+      });
+
       window.__browserTest = { status: "running" };
-      manager.registerStream({
-        messageType: "browser:late",
-        origin: childOrigin,
-        callback: async () => {
-          await new Promise((resolve) => setTimeout(resolve, 80));
-          return new ReadableStream({
-            cancel() { lateCancelled = true; },
-          });
-        },
-      });
-      manager.registerStream({
-        messageType: "browser:clone-error",
-        origin: childOrigin,
-        callback: () => new ReadableStream({
-          start(controller) { controller.enqueue(() => undefined); },
-          cancel() { cloneCancelled = true; },
-        }),
-      });
-      manager.registerStream({
-        messageType: "browser:queued-close",
-        origin: childOrigin,
-        callback: () => new ReadableStream({
-          start(controller) {
-            controller.enqueue("first");
-            controller.enqueue("queued");
-            controller.close();
-          },
-        }),
-      });
       window.addEventListener("message", (event) => {
         if (
           event.origin !== childOrigin ||
@@ -115,21 +96,17 @@
             ...event.data.result,
             userAgent: navigator.userAgent,
             cancelled,
-            lateCancelled,
-            cloneCancelled,
+            aborted,
             uncaught: [...uncaught, ...(event.data.result.uncaught ?? [])],
             nativeTransferSupported: supportsNativeTransfer(),
           };
           result.passed =
             JSON.stringify(result.normal) === JSON.stringify(["a", "b"]) &&
-            result.error?.name === "BrowserStreamError" &&
-            result.error?.message === "browser failure" &&
+            result.callbackError?.name === "CallbackError" &&
+            result.callbackError?.message === "callback failed" &&
             result.cancelled === true &&
-            result.lateCancelled === true &&
-            result.cloneCancelled === true &&
-            result.openingTimeout === true &&
-            result.cloneError?.name === "DataCloneError" &&
-            result.queuedCloseRuns === 10 &&
+            result.aborted === true &&
+            result.abortError?.name === "AbortError" &&
             result.uncaught.length === 0;
           window.__browserTest = result;
           document.querySelector("#result").textContent = JSON.stringify(

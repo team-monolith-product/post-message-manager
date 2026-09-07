@@ -173,39 +173,13 @@ describe("stream transport", () => {
     ]);
   });
 
-  it(
-    "does not discard another manager's stream response",
-    async () => {
-      const consumer = new PostMessageManagerImpl();
-      const messageType = "stream:other-manager";
-      manager.register({
-        messageType,
-        callback: () =>
-          createStreamWire(new ReadableStream<string>({
-            start(controller) {
-              controller.enqueue("owned");
-              controller.close();
-            },
-          })),
-      });
-
-      await expect(collect(consumer.stream({
-        messageType,
-        payload: null,
-        ...sendBase,
-      }))).resolves.toEqual(["owned"]);
-    }
-  );
-
-  it("preserves a stream error name and message", async () => {
+  it("propagates an error from a native stream", async () => {
     manager.registerStream({
       messageType: "stream:error",
       callback: () =>
         new ReadableStream({
           start(controller) {
-            const error = new Error("stream failed");
-            error.name = "SupplierError";
-            controller.error(error);
+            controller.error(new Error("stream failed"));
           },
         }),
     });
@@ -218,10 +192,7 @@ describe("stream transport", () => {
           ...sendBase,
         })
       )
-    ).rejects.toMatchObject({
-      name: "SupplierError",
-      message: "stream failed",
-    });
+    ).rejects.toThrow("stream failed");
   });
 
   it("returns a serialized error when the stream callback rejects", async () => {
@@ -246,6 +217,25 @@ describe("stream transport", () => {
       name: "CallbackError",
       message: "callback failed",
     });
+  });
+
+  it("returns a serialized error when the stream callback throws", async () => {
+    manager.registerStream({
+      messageType: "stream:callback-throw",
+      callback: () => {
+        throw new Error("callback threw");
+      },
+    });
+
+    await expect(
+      collect(
+        manager.stream({
+          messageType: "stream:callback-throw",
+          payload: null,
+          ...sendBase,
+        })
+      )
+    ).rejects.toThrow("callback threw");
   });
 
   it("does not send a request for an already aborted signal", async () => {
@@ -309,48 +299,6 @@ describe("stream transport", () => {
 
     expect(cancelled).toHaveBeenCalledTimes(1);
   });
-
-  it.each([false, true])(
-    "cancels a late response after the opening timeout (aborted: %s)",
-    async (aborted) => {
-      const cancelled = jest.fn<(reason?: unknown) => void>();
-      let resolveSource!: (source: ReadableStream<string>) => void;
-      const messageType = `stream:late-timeout:${aborted}`;
-      manager.register({
-        messageType,
-        callback: async () =>
-          createStreamWire(
-            await new Promise<ReadableStream<string>>((resolve) => {
-              resolveSource = resolve;
-            })
-          ),
-      });
-
-      const abortController = new AbortController();
-      const result = collect(manager.stream({
-        messageType,
-        payload: null,
-        timeoutMs: 20,
-        signal: abortController.signal,
-        ...sendBase,
-      }));
-      if (aborted) {
-        await nextTask();
-        abortController.abort();
-        await expect(result).rejects.toMatchObject({ name: "AbortError" });
-        await new Promise((resolve) => setTimeout(resolve, 30));
-      } else {
-        await expect(result).rejects.toThrow("Timeout");
-      }
-      resolveSource(new ReadableStream<string>({ cancel: cancelled }));
-      for (let i = 0; i < 10 && cancelled.mock.calls.length === 0; i++) {
-        await nextTask();
-      }
-
-      expect(Object.keys(manager.responseHandlers)).toHaveLength(0);
-      expect(cancelled).toHaveBeenCalledTimes(1);
-    }
-  );
 
   it("preserves AbortError when the source rejects cancellation", async () => {
     const cancelled = jest.fn(async () => {
