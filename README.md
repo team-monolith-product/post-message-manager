@@ -144,7 +144,7 @@ for await (const chunk of manager.stream<string>({
 }
 ```
 
-브라우저가 transferable `ReadableStream`을 지원하면 native 전송을 사용합니다. 지원하지 않으면 내부 `MessagePort` 전송을 사용합니다. 두 전송 방식은 동일한 공개 API와 오류 형식을 제공합니다.
+브라우저가 transferable `ReadableStream`을 지원하면 native 전송을 사용합니다. 지원하지 않으면 내부 `MessagePort` 전송을 사용합니다. `registerStream` callback이 실패하면 소비자에게 즉시 오류를 전달합니다.
 
 ### 핸들러 제거
 
@@ -297,7 +297,7 @@ interface StreamProps extends SendProps {
 
 `timeoutMs`는 스트림이 열릴 때까지 기다리는 시간입니다. 스트림이 열린 뒤 chunk 사이의 시간에는 적용되지 않습니다.
 
-공급자는 스트림을 빠르게 반환하고, `cancel()`에서 자신의 네트워크 요청을 중단해야 합니다. callback이 아직 스트림을 반환하지 않았다면 PMM은 그 내부 작업을 중단할 수 없습니다. SSE의 첫 응답 기한, 재시도, chunk 사이의 대기 시간은 호출부가 정합니다.
+공급자는 스트림을 빠르게 반환하고, `cancel()`에서 자신의 네트워크 요청을 중단해야 합니다. callback이 아직 스트림을 반환하지 않았다면 PMM은 그 내부 작업을 바로 중단할 수 없습니다. 나중에 반환된 스트림은 취소합니다. SSE의 첫 응답 기한, 재시도, chunk 사이의 대기 시간은 호출부가 정합니다.
 
 ## 주의사항
 
