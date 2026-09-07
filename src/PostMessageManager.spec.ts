@@ -314,6 +314,7 @@ describe("stream transport", () => {
         messageType: "stream:opening-abort",
         payload: null,
         signal: abortController.signal,
+        timeoutMs: 10,
         ...sendBase,
       })
     );
@@ -321,6 +322,7 @@ describe("stream transport", () => {
 
     abortController.abort();
     await expect(result).rejects.toMatchObject({ name: "AbortError" });
+    await new Promise((resolve) => setTimeout(resolve, 20));
 
     resolveSource(
       new ReadableStream<string>({
@@ -331,6 +333,53 @@ describe("stream transport", () => {
     await nextTask();
 
     expect(cancelled).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores an opening cancellation from another origin", async () => {
+    const cancelled = jest.fn<(reason?: unknown) => void>();
+    let resolveSource!: (source: ReadableStream<string>) => void;
+    manager.registerStream({
+      messageType: "stream:cancel-origin",
+      callback: () =>
+        new Promise<ReadableStream<string>>((resolve) => {
+          resolveSource = resolve;
+        }),
+    });
+    const result = collect(
+      manager.stream<string>({
+        messageType: "stream:cancel-origin",
+        payload: null,
+        ...sendBase,
+      })
+    );
+    await nextTask();
+    const request = [...sentMessages]
+      .reverse()
+      .find(
+        (message) =>
+          message.type === "request" &&
+          message.messageType === "stream:cancel-origin"
+      );
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: { type: "stream-cancel", parentId: request.id },
+        origin: "https://other.example.com",
+        source: window,
+      })
+    );
+    resolveSource(
+      new ReadableStream<string>({
+        start(controller) {
+          controller.enqueue("kept");
+          controller.close();
+        },
+        cancel: cancelled,
+      })
+    );
+
+    await expect(result).resolves.toEqual(["kept"]);
+    expect(cancelled).not.toHaveBeenCalled();
   });
 
   it("preserves AbortError when the source rejects cancellation", async () => {

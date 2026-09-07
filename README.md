@@ -110,8 +110,6 @@ manager.notify({
 
 ### 스트림 보내고 받기
 
-보내는 쪽은 `ReadableStream`을 반환하는 핸들러를 등록합니다.
-
 ```typescript
 manager.registerStream<string>({
   messageType: "generateText",
@@ -127,7 +125,7 @@ manager.registerStream<string>({
 });
 ```
 
-받는 쪽은 `AsyncGenerator`를 순회합니다. 순회를 중단하거나 `AbortSignal`을 취소하면 보내는 쪽의 스트림도 취소됩니다.
+순회를 중단하거나 `AbortSignal`을 취소하면 보내는 쪽의 스트림도 취소됩니다.
 
 ```typescript
 const controller = new AbortController();
@@ -249,8 +247,6 @@ interface RegisterProps {
 
 ### `registerStream<T>(args: RegisterStreamProps<T>): void`
 
-`ReadableStream`을 반환하는 스트림 핸들러를 등록합니다.
-
 ```typescript
 interface RegisterStreamProps<T> {
   messageType: string;
@@ -260,8 +256,6 @@ interface RegisterStreamProps<T> {
 ```
 
 ### `unregisterStream(messageType: string): void`
-
-등록된 스트림 핸들러를 제거합니다.
 
 ### `send<T>(args: SendProps): Promise<T>`
 
@@ -286,8 +280,6 @@ type NotifyProps = Omit<SendProps, "timeoutMs">;
 ```
 
 ### `stream<T>(args: StreamProps): AsyncGenerator<T, void, void>`
-
-원격 스트림을 열고 chunk를 순서대로 반환합니다.
 
 ```typescript
 interface StreamProps extends SendProps {

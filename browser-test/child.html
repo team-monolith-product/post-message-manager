@@ -60,8 +60,32 @@
         } catch (reason) {
           abortError = { name: reason.name, message: reason.message };
         }
+
+        const openingController = new AbortController();
+        const opening = manager
+          .stream({
+            ...request,
+            messageType: "browser:opening-abort",
+            signal: openingController.signal,
+            timeoutMs: 10,
+          })
+          .next();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        openingController.abort();
+        let openingAbortError;
+        try {
+          await opening;
+        } catch (reason) {
+          openingAbortError = { name: reason.name, message: reason.message };
+        }
         await new Promise((resolve) => setTimeout(resolve, 30));
-        return { normal, callbackError, abortError, uncaught };
+        return {
+          normal,
+          callbackError,
+          abortError,
+          openingAbortError,
+          uncaught,
+        };
       }
 
       run()

@@ -12,6 +12,7 @@
       const manager = new PostMessageManager.default(500);
       let cancelled = false;
       let aborted = false;
+      let openingAborted = false;
       const uncaught = [];
       window.addEventListener("error", (event) => uncaught.push(event.message));
       window.addEventListener("unhandledrejection", (event) => {
@@ -83,6 +84,19 @@
           }),
       });
 
+      manager.registerStream({
+        messageType: "browser:opening-abort",
+        origin: childOrigin,
+        callback: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 80));
+          return new ReadableStream({
+            cancel() {
+              openingAborted = true;
+            },
+          });
+        },
+      });
+
       window.__browserTest = { status: "running" };
       window.addEventListener("message", (event) => {
         if (
@@ -97,6 +111,7 @@
             userAgent: navigator.userAgent,
             cancelled,
             aborted,
+            openingAborted,
             uncaught: [...uncaught, ...(event.data.result.uncaught ?? [])],
             nativeTransferSupported: supportsNativeTransfer(),
           };
@@ -107,6 +122,8 @@
             result.cancelled === true &&
             result.aborted === true &&
             result.abortError?.name === "AbortError" &&
+            result.openingAborted === true &&
+            result.openingAbortError?.name === "AbortError" &&
             result.uncaught.length === 0;
           window.__browserTest = result;
           document.querySelector("#result").textContent = JSON.stringify(

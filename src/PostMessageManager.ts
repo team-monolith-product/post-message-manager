@@ -22,14 +22,29 @@ interface MessageResponse {
   payload: any;
 }
 
-type RequestHandler = Pick<
-  PostMessageManager.RegisterProps,
-  "callback" | "origin"
->;
+interface MessageStreamCancel {
+  type: "stream-cancel";
+  parentId: string;
+}
+
+type RequestContext = {
+  id: string;
+  origin: string;
+  source: MessageEventSource | null;
+};
+type RequestHandler = {
+  callback: (payload: any, context: RequestContext) => Promise<any> | any;
+  origin?: string | ((origin: string) => boolean);
+};
 type ResponseHandler = {
   resolve: (payload: any) => void;
   timer: ReturnType<typeof setTimeout>;
 } & Pick<MessageResponse, "type" | "parentId">;
+type StreamRequestState = {
+  cancelled: boolean;
+  origin: string;
+  source: MessageEventSource | null;
+};
 
 function isOriginAllowed(
   allowed: string | ((origin: string) => boolean) | undefined,
@@ -106,6 +121,7 @@ export class PostMessageManagerImpl implements PostMessageManager {
   constructor(timeoutMs = 3000) {
     this.requestHandlers = Object.create(null);
     this.responseHandlers = Object.create(null);
+    this.streamRequestStates = Object.create(null);
     this.timeoutMs = timeoutMs;
     this._init();
   }
@@ -115,11 +131,22 @@ export class PostMessageManagerImpl implements PostMessageManager {
   }
 
   private async _onMessage(
-    event: MessageEvent<MessageResponse | MessageRequest>
+    event: MessageEvent<
+      MessageResponse | MessageRequest | MessageStreamCancel
+    >
   ) {
     const { data } = event;
 
-    if (data.type === "request") {
+    if (data.type === "stream-cancel") {
+      const state = this.streamRequestStates[data.parentId];
+      if (
+        state &&
+        state.origin === event.origin &&
+        state.source === event.source
+      ) {
+        state.cancelled = true;
+      }
+    } else if (data.type === "request") {
       // request type의 message를 받으면, handler를 찾아서 실행하고 response message를 보낸다.
       const { messageType, payload, id } = data;
       const handler = this.requestHandlers[messageType];
@@ -133,7 +160,11 @@ export class PostMessageManagerImpl implements PostMessageManager {
 
       // request message에 대해서는 항상 response message를 보낸다.
       // (callback의 return 값이 없어도 response message를 보낸다.)
-      const response = await handler.callback(payload);
+      const response = await handler.callback(payload, {
+        id,
+        origin: event.origin,
+        source: event.source,
+      });
       const message: MessageResponse = {
         type: "response",
         parentId: id,
@@ -164,10 +195,14 @@ export class PostMessageManagerImpl implements PostMessageManager {
 
   register(args: PostMessageManager.RegisterProps) {
     const { messageType, callback, origin } = args;
+    this._register(messageType, { callback, origin });
+  }
+
+  private _register(messageType: string, handler: RequestHandler) {
     if (this.requestHandlers[messageType]) {
       console.warn(`Handler for ${messageType} is already registered`);
     }
-    this.requestHandlers[messageType] = { callback, origin };
+    this.requestHandlers[messageType] = handler;
   }
 
   unregister(messageType: string) {
@@ -175,6 +210,10 @@ export class PostMessageManagerImpl implements PostMessageManager {
   }
 
   async send<T>(args: PostMessageManager.SendProps) {
+    return this._send<T>(args);
+  }
+
+  private _send<T>(args: PostMessageManager.SendProps, id = uid()) {
     const {
       messageType,
       payload,
@@ -182,12 +221,11 @@ export class PostMessageManagerImpl implements PostMessageManager {
       targetOrigin,
       timeoutMs: timeoutMsArgs,
     } = args;
-    const id = uid();
 
     // args로 timeoutMs를 설정하면 그 값을 사용하고, 없으면 기본값을 사용합니다.
     const timeoutMs = timeoutMsArgs ?? this.timeoutMs;
 
-    const promise = new Promise<T>((resolve, reject) => {
+    return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         reject(
           new Error(
@@ -211,7 +249,6 @@ export class PostMessageManagerImpl implements PostMessageManager {
         timer,
       };
     });
-    return promise;
   }
 
   notify(args: PostMessageManager.NotifyProps): void {
@@ -227,14 +264,26 @@ export class PostMessageManagerImpl implements PostMessageManager {
 
   registerStream<T>(args: PostMessageManager.RegisterStreamProps<T>): void {
     const { messageType, callback, origin } = args;
-    this.register({
-      messageType,
+    this._register(messageType, {
       origin,
-      callback: async (payload) => {
+      callback: async (payload, context) => {
+        const state = {
+          cancelled: false,
+          origin: context.origin,
+          source: context.source,
+        };
+        this.streamRequestStates[context.id] = state;
         try {
-          return createStreamWire(await callback(payload));
+          const response = createStreamWire(await callback(payload));
+          if (state.cancelled) {
+            void readStreamWire(response).cancel().catch(() => undefined);
+            return serializeStreamError(createAbortError(messageType));
+          }
+          return response;
         } catch (error) {
           return serializeStreamError(error);
+        } finally {
+          delete this.streamRequestStates[context.id];
         }
       },
     });
@@ -252,6 +301,7 @@ export class PostMessageManagerImpl implements PostMessageManager {
         throw createAbortError(args.messageType);
       }
 
+      const requestId = uid();
       let reader: ReadableStreamDefaultReader<T> | undefined;
       let abortError: Error | undefined;
       let rejectOpening: ((reason: Error) => void) | undefined;
@@ -265,13 +315,18 @@ export class PostMessageManagerImpl implements PostMessageManager {
         if (reader) {
           void reader.cancel(abortError).catch(() => undefined);
         } else {
+          const message: MessageStreamCancel = {
+            type: "stream-cancel",
+            parentId: requestId,
+          };
+          sendArgs.target.postMessage(message, sendArgs.targetOrigin);
           rejectOpening?.(abortError);
         }
       };
       signal?.addEventListener("abort", onAbort, { once: true });
 
       try {
-        const response = manager.send<unknown>(sendArgs);
+        const response = manager._send<unknown>(sendArgs, requestId);
         let wire: unknown;
         try {
           wire = openingAborted
@@ -321,5 +376,6 @@ export class PostMessageManagerImpl implements PostMessageManager {
 
   requestHandlers: Record<string, RequestHandler>;
   responseHandlers: Record<string, ResponseHandler>;
+  private streamRequestStates: Record<string, StreamRequestState>;
   timeoutMs: number;
 }
