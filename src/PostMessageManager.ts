@@ -32,8 +32,15 @@ type RequestContext = {
   origin: string;
   source: MessageEventSource | null;
 };
+type PreparedResponse = {
+  payload: any;
+  transfer: Transferable[];
+};
 type RequestHandler = {
-  callback: (payload: any, context: RequestContext) => Promise<any> | any;
+  callback: (
+    payload: any,
+    context: RequestContext
+  ) => Promise<PreparedResponse> | PreparedResponse;
   origin?: string | ((origin: string) => boolean);
 };
 type ResponseHandler = {
@@ -169,14 +176,14 @@ export class PostMessageManagerImpl implements PostMessageManager {
         type: "response",
         parentId: id,
         messageType,
-        payload: response,
+        payload: response.payload,
       };
       // srcdoc iframe의 origin은 "null"(opaque origin)이므로 postMessage의
       // targetOrigin으로 사용할 수 없다. 이 경우 "*"로 대체한다.
       const responseOrigin = event.origin === "null" ? "*" : event.origin;
       event.source?.postMessage(message, {
         targetOrigin: responseOrigin,
-        transfer: streamWireTransferList(response),
+        transfer: response.transfer,
       });
     } else if (data.type === "response") {
       // response type의 message를 받으면, handler를 찾아서
@@ -195,7 +202,13 @@ export class PostMessageManagerImpl implements PostMessageManager {
 
   register(args: PostMessageManager.RegisterProps) {
     const { messageType, callback, origin } = args;
-    this._register(messageType, { callback, origin });
+    this._register(messageType, {
+      origin,
+      callback: async (payload) => ({
+        payload: await callback(payload),
+        transfer: [],
+      }),
+    });
   }
 
   private _register(messageType: string, handler: RequestHandler) {
@@ -274,14 +287,19 @@ export class PostMessageManagerImpl implements PostMessageManager {
         };
         this.streamRequestStates[context.id] = state;
         try {
-          const response = createStreamWire(await callback(payload));
+          const source = await callback(payload);
           if (state.cancelled) {
-            void readStreamWire(response).cancel().catch(() => undefined);
-            return serializeStreamError(createAbortError(messageType));
+            const error = createAbortError(messageType);
+            void source.cancel(error).catch(() => undefined);
+            return { payload: serializeStreamError(error), transfer: [] };
           }
-          return response;
+          const response = createStreamWire(source);
+          return {
+            payload: response,
+            transfer: streamWireTransferList(response),
+          };
         } catch (error) {
-          return serializeStreamError(error);
+          return { payload: serializeStreamError(error), transfer: [] };
         } finally {
           delete this.streamRequestStates[context.id];
         }

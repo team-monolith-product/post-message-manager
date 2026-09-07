@@ -15,6 +15,7 @@ import {
 
 const ORIGIN = "https://parent.example.com";
 const sentMessages: any[] = [];
+const sentTransfers: Transferable[][] = [];
 
 Object.assign(globalThis, {
   MessageChannel: NodeMessageChannel,
@@ -34,6 +35,7 @@ beforeAll(() => {
         : [];
     const delivered = message;
     sentMessages.push(delivered);
+    sentTransfers.push([...transfer]);
     queueMicrotask(() => {
       window.dispatchEvent(
         new MessageEvent("message", {
@@ -84,6 +86,33 @@ describe("request/response compatibility", () => {
     ).rejects.toThrow("Timeout");
 
     expect(Object.keys(manager.responseHandlers)).toHaveLength(0);
+  });
+
+  it("does not interpret an application payload as a stream wire", async () => {
+    const payload = {
+      type: "post-message-manager-stream-port",
+      port: { application: true },
+    };
+    const firstMessage = sentMessages.length;
+    manager.register({
+      messageType: "compat:stream-shaped-payload",
+      callback: () => payload,
+    });
+
+    await expect(
+      manager.send({
+        messageType: "compat:stream-shaped-payload",
+        payload: null,
+        ...sendBase,
+      })
+    ).resolves.toBe(payload);
+    const responseIndex = sentMessages.findIndex(
+      (message, index) =>
+        index >= firstMessage &&
+        message.type === "response" &&
+        message.messageType === "compat:stream-shaped-payload"
+    );
+    expect(sentTransfers[responseIndex]).toEqual([]);
   });
 });
 
