@@ -561,7 +561,7 @@ describe("stream transport", () => {
     ).rejects.toThrow("Timeout");
   });
 
-  it("applies the existing origin predicate to stream registration", async () => {
+  it("applies the origin predicate to stream registration", async () => {
     const callback = jest.fn(
       () =>
         new ReadableStream({
