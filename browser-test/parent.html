@@ -35,7 +35,7 @@
         };
       }
     </script>
-    <script src="/dist/post-message-manager.js"></script>
+    <script src="/browser-test/load-bundle.js"></script>
   </head>
   <body>
     <pre id="result">running</pre>
@@ -172,8 +172,7 @@
             result.transports?.[expectedTransport] > 0 &&
             result.transports?.[
               expectedTransport === "native" ? "fallback" : "native"
-            ] ===
-              0;
+            ] === 0;
           window.__browserTest = result;
           document.querySelector("#result").textContent = JSON.stringify(
             result,
@@ -190,6 +189,8 @@
       const iframe = document.createElement("iframe");
       const childUrl = new URL("/browser-test/child.html", childOrigin);
       childUrl.searchParams.set("parentOrigin", location.origin);
+      if (params.has("bundleSha256"))
+        childUrl.searchParams.set("bundleSha256", params.get("bundleSha256"));
       iframe.src = childUrl.href;
       document.body.appendChild(iframe);
     </script>

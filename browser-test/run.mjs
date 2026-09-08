@@ -1,6 +1,6 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { Builder } from "selenium-webdriver";
+import { Builder, By } from "selenium-webdriver";
 import { configure, assertResult } from "./config.mjs";
 import { startServers } from "./server.mjs";
 
@@ -40,17 +40,27 @@ try {
     const url = new URL(config.parentUrl);
     url.searchParams.set("mode", mode);
     url.searchParams.set("childOrigin", config.childOrigin);
+    url.searchParams.set("bundleSha256", expectedBundle);
     await driver.get(url.href);
-    const bundle = await driver.executeAsyncScript(`
-      const done = arguments[arguments.length - 1];
-      fetch("/dist/post-message-manager.js", { cache: "no-store" })
-        .then(response => { if (!response.ok) throw new Error(); return response.text(); })
-        .then(text => done({ text }), () => done({ error: true }));
-    `);
-    if (bundle.error || digest(bundle.text) !== expectedBundle) {
-      throw new Error(
-        "The remote fixture bundle does not match this checkout's build.",
-      );
+    for (const frame of ["parent", "child"]) {
+      if (frame === "child")
+        await driver
+          .switchTo()
+          .frame(await driver.findElement(By.css("iframe")));
+      try {
+        const bundle = await driver.executeScript(
+          "return { loaded: window.__bundleLoaded, hash: window.__bundleSha256 }",
+        );
+        if (bundle.loaded !== true || bundle.hash !== expectedBundle) {
+          throw new Error(
+            "The " +
+              frame +
+              " fixture bundle does not match this checkout's build.",
+          );
+        }
+      } finally {
+        await driver.switchTo().defaultContent();
+      }
     }
     const result = await driver.wait(
       async () => {
