@@ -13,9 +13,10 @@ Object.assign(globalThis, {
 });
 const ORIGIN = "https://parent.example.com";
 const messages: any[] = [];
+let responseDelayMs = 0;
 
 beforeAll(() => {
-  // jsdom omits origin/source; MessageChannel performs structured clone and transfer.
+  // jsdom의 origin/source 누락을 보완하기 위한 대역
   window.postMessage = ((
     message: unknown,
     options?: string | WindowPostMessageOptions,
@@ -24,13 +25,17 @@ beforeAll(() => {
     channel.port2.onmessage = (event) => {
       channel.port1.close();
       channel.port2.close();
-      window.dispatchEvent(
-        new MessageEvent("message", {
-          data: event.data,
-          origin: ORIGIN,
-          source: window,
-        }),
-      );
+      const dispatch = () =>
+        window.dispatchEvent(
+          new MessageEvent("message", {
+            data: event.data,
+            origin: ORIGIN,
+            source: window,
+          }),
+        );
+      if (event.data.type === "response" && responseDelayMs)
+        setTimeout(dispatch, responseDelayMs);
+      else dispatch();
     };
     try {
       channel.port1.postMessage(
@@ -77,6 +82,27 @@ function source(...values: string[]) {
 }
 
 describe("request and stream contracts", () => {
+  it("cancels a transferred response delivered after the opening timeout", async () => {
+    let cancelled!: (reason: unknown) => void;
+    const cancellation = new Promise<unknown>((resolve) => {
+      cancelled = resolve;
+    });
+    manager.registerStream({
+      messageType: "late-response",
+      callback: () => new ReadableStream({ cancel: cancelled }),
+    });
+    responseDelayMs = 60;
+    try {
+      await expect(
+        manager.stream({ ...request("late-response"), timeoutMs: 10 }),
+      ).rejects.toThrow("Timeout");
+      await expect(cancellation).resolves.toMatchObject({
+        message: expect.stringContaining("Timeout"),
+      });
+    } finally {
+      responseDelayMs = 0;
+    }
+  });
   it("round trips application payloads without interpreting stream tags", async () => {
     const payload = {
       type: "post-message-manager-stream-port",

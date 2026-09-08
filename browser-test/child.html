@@ -8,6 +8,30 @@
   <body>
     <script>
       const parentOrigin = "http://127.0.0.1:4173";
+      const delayedResponses = new WeakSet();
+      window.addEventListener("message", (event) => {
+        if (
+          event.origin !== parentOrigin ||
+          event.data?.type !== "response" ||
+          event.data?.messageType !== "browser:late-response" ||
+          delayedResponses.has(event.data)
+        )
+          return;
+        event.stopImmediatePropagation();
+        delayedResponses.add(event.data);
+        setTimeout(
+          () =>
+            window.dispatchEvent(
+              new MessageEvent("message", {
+                data: event.data,
+                origin: event.origin,
+                source: event.source,
+                ports: event.ports,
+              }),
+            ),
+          60,
+        );
+      });
       const manager = new PostMessageManager.default(500);
       const uncaught = [];
       const transports = { native: 0, fallback: 0 };
@@ -86,6 +110,9 @@
         const openTimeoutError = await failure(() =>
           open("open-timeout", { timeoutMs: 10 }),
         );
+        const lateResponseError = await failure(() =>
+          open("late-response", { timeoutMs: 10 }),
+        );
         const unregister = await collect("unregister");
         const rpc = await manager.send({
           ...request,
@@ -101,6 +128,7 @@
           abortError,
           openingAbortError,
           openTimeoutError,
+          lateResponseError,
           unregister,
           rpc,
           unregisteredError,

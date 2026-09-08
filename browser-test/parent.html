@@ -59,7 +59,13 @@
             },
           }),
       );
-      for (const name of ["cancel", "abort", "opening-abort", "open-timeout"]) {
+      for (const name of [
+        "cancel",
+        "abort",
+        "opening-abort",
+        "open-timeout",
+        "late-response",
+      ]) {
         register(name, async () => {
           if (name.startsWith("open"))
             await new Promise((resolve) => setTimeout(resolve, 80));
@@ -124,6 +130,8 @@
             equal(result.openingAbortError, { action: "opening-abort" }) &&
             !!result.openTimeoutError &&
             !!cancellations["open-timeout"] &&
+            !!result.lateResponseError &&
+            !!cancellations["late-response"] &&
             equal(result.unregister, ["before", "after"]) &&
             result.rpc === "rpc" &&
             !!result.unregisteredError &&

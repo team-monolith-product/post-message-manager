@@ -21,6 +21,7 @@ interface MessageResponse {
   messageType: string;
   parentId: string;
   payload: any;
+  stream?: true;
 }
 
 interface MessageStreamCancel {
@@ -176,6 +177,7 @@ export class PostMessageManagerImpl implements PostMessageManager {
         parentId: id,
         messageType,
         payload: response.payload,
+        ...(data.stream ? { stream: true as const } : {}),
       };
       // srcdoc iframe의 origin은 "null"(opaque origin)이므로 postMessage의
       // targetOrigin으로 사용할 수 없다. 이 경우 "*"로 대체한다.
@@ -201,6 +203,17 @@ export class PostMessageManagerImpl implements PostMessageManager {
       const { payload, parentId } = data;
       const handler = this.responseHandlers[parentId];
       if (!handler) {
+        if (data.stream) {
+          void Promise.resolve()
+            .then(() =>
+              readStreamWire(payload).cancel(
+                new Error(
+                  "Timeout: stream response arrived after the opening deadline",
+                ),
+              ),
+            )
+            .catch(() => undefined);
+        }
         return;
       }
       // payload가 undefined일 수 있다.
