@@ -203,7 +203,7 @@ export class PostMessageManagerImpl implements PostMessageManager {
       const { payload, parentId } = data;
       const handler = this.responseHandlers[parentId];
       if (!handler) {
-        if (data.stream) {
+        if (data.stream && parentId.startsWith(this.streamIdPrefix)) {
           void Promise.resolve()
             .then(() =>
               readStreamWire(payload).cancel(
@@ -354,7 +354,7 @@ export class PostMessageManagerImpl implements PostMessageManager {
     if (signal?.aborted) {
       throw signal.reason;
     }
-    const requestId = uid();
+    const requestId = this.streamIdPrefix + uid();
     let rejectOpening: (reason: unknown) => void = () => undefined;
     const aborted = new Promise<never>((_, reject) => {
       rejectOpening = reject;
@@ -396,5 +396,6 @@ export class PostMessageManagerImpl implements PostMessageManager {
   responseHandlers: Record<string, ResponseHandler>;
   private streamRequestStates: Record<string, StreamRequestState>;
   private streamHandlers: Record<string, RequestHandler>;
+  private readonly streamIdPrefix = uid() + ":";
   timeoutMs: number;
 }

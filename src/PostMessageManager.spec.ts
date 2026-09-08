@@ -82,6 +82,13 @@ function source(...values: string[]) {
 }
 
 describe("request and stream contracts", () => {
+  it("does not cancel another manager's stream response", async () => {
+    new PostMessageManagerImpl();
+    manager.registerStream({ messageType: "owner", callback: () => source("owned") });
+    const stream = await manager.stream<string>(request("owner"));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await expect(collect(Promise.resolve(stream))).resolves.toEqual(["owned"]);
+  });
   it("cancels a transferred response delivered after the opening timeout", async () => {
     let cancelled!: (reason: unknown) => void;
     const cancellation = new Promise<unknown>((resolve) => {
