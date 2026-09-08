@@ -125,20 +125,32 @@ manager.registerStream<string>({
 });
 ```
 
-순회를 중단하거나 `AbortSignal`을 취소하면 보내는 쪽의 스트림도 취소됩니다.
+`stream()`은 호출 즉시 요청하고 스트림이 열리면 `ReadableStream`을 반환합니다. 스트림이나 `AbortSignal`을 취소하면 공급자에도 취소 사유가 전달됩니다.
 
 ```typescript
 const controller = new AbortController();
 
-for await (const chunk of manager.stream<string>({
+const stream = await manager.stream<string>({
   messageType: "generateText",
   payload: { prompt: "hello" },
   target: iframe.contentWindow!,
   targetOrigin: "https://trusted-site.com",
   signal: controller.signal,
   timeoutMs: 5000,
-})) {
-  console.log(chunk);
+});
+const reader = stream.getReader();
+try {
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    console.log(value);
+  }
+} finally {
+  try {
+    await reader.cancel();
+  } finally {
+    reader.releaseLock();
+  }
 }
 ```
 
@@ -257,6 +269,8 @@ interface RegisterStreamProps<T> {
 
 ### `unregisterStream(messageType: string): void`
 
+새 요청을 받지 않도록 스트림 핸들러를 제거합니다. 이미 시작된 스트림은 계속 진행합니다. 개별 스트림은 `cancel()`이나 `AbortSignal`로 취소합니다. 일반 메시지 핸들러와 스트림 핸들러는 같은 이름으로 등록할 수 있으며 각각 `unregister()`와 `unregisterStream()`으로 제거합니다.
+
 ### `send<T>(args: SendProps): Promise<T>`
 
 메시지를 보내고 응답을 기다립니다.
@@ -279,7 +293,7 @@ interface SendProps {
 type NotifyProps = Omit<SendProps, "timeoutMs">;
 ```
 
-### `stream<T>(args: StreamProps): AsyncGenerator<T, void, void>`
+### `stream<T>(args: StreamProps): Promise<ReadableStream<T>>`
 
 ```typescript
 interface StreamProps extends SendProps {
@@ -287,7 +301,7 @@ interface StreamProps extends SendProps {
 }
 ```
 
-`timeoutMs`는 스트림이 열릴 때까지 기다리는 시간입니다.
+`timeoutMs`는 호출부터 스트림이 열릴 때까지 기다리는 시간입니다. 기한이 지나면 요청이 실패하고 뒤늦게 반환되는 공급자 스트림도 취소됩니다. `signal`은 요청 시작 전부터 스트림을 읽는 동안까지 적용되며 취소 사유는 `signal.reason`입니다.
 
 공급자는 스트림을 빠르게 반환하고, `cancel()`에서 자신의 네트워크 요청을 중단해야 합니다. callback이 스트림을 반환할 때까지 내부 작업의 생명주기는 callback이 관리합니다. 취소된 요청에서 반환한 스트림은 PMM이 취소합니다. SSE의 첫 응답 기한, 재시도, chunk 사이의 대기 시간은 호출부가 정합니다.
 

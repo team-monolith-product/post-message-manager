@@ -3,6 +3,20 @@
   <head>
     <meta charset="utf-8" />
     <title>PostMessageManager stream browser test</title>
+    <script>
+      const mode = new URLSearchParams(location.search).get("mode") ?? "native";
+      if (mode === "fallback") {
+        const postMessage = MessagePort.prototype.postMessage;
+        MessagePort.prototype.postMessage = function (value, transfer) {
+          if (value instanceof ReadableStream)
+            throw new DOMException(
+              "Forced unsupported transfer",
+              "DataCloneError",
+            );
+          return postMessage.call(this, value, transfer);
+        };
+      }
+    </script>
     <script src="/dist/post-message-manager.js"></script>
   </head>
   <body>
@@ -10,33 +24,21 @@
     <script>
       const childOrigin = "http://127.0.0.1:4174";
       const manager = new PostMessageManager.default(500);
-      let cancelled = false;
-      let aborted = false;
-      let openingAborted = false;
+      const cancellations = {};
       const uncaught = [];
       window.addEventListener("error", (event) => uncaught.push(event.message));
-      window.addEventListener("unhandledrejection", (event) => {
-        uncaught.push(String(event.reason));
-      });
-
-      function supportsNativeTransfer() {
-        const channel = new MessageChannel();
-        const stream = new ReadableStream();
-        try {
-          channel.port1.postMessage(stream, [stream]);
-          return true;
-        } catch {
-          return false;
-        } finally {
-          channel.port1.close();
-          channel.port2.close();
-        }
-      }
-
-      manager.registerStream({
-        messageType: "browser:normal",
-        origin: childOrigin,
-        callback: () =>
+      window.addEventListener("unhandledrejection", (event) =>
+        uncaught.push(String(event.reason)),
+      );
+      const register = (name, callback) =>
+        manager.registerStream({
+          messageType: `browser:${name}`,
+          origin: childOrigin,
+          callback,
+        });
+      register(
+        "normal",
+        () =>
           new ReadableStream({
             start(controller) {
               controller.enqueue("a");
@@ -44,92 +46,96 @@
               controller.close();
             },
           }),
+      );
+      register("callback-error", () => {
+        throw { code: 429, detail: "retry" };
       });
-
-      manager.registerStream({
-        messageType: "browser:callback-error",
-        origin: childOrigin,
-        callback: () => {
-          const error = new Error("callback failed");
-          error.name = "CallbackError";
-          throw error;
-        },
-      });
-
-      manager.registerStream({
-        messageType: "browser:cancel",
-        origin: childOrigin,
-        callback: () =>
+      register(
+        "stream-error",
+        () =>
           new ReadableStream({
             start(controller) {
-              controller.enqueue("first");
-            },
-            cancel() {
-              cancelled = true;
+              controller.error({ code: 503, detail: "unavailable" });
             },
           }),
-      });
-
-      manager.registerStream({
-        messageType: "browser:abort",
-        origin: childOrigin,
-        callback: () =>
-          new ReadableStream({
-            start(controller) {
-              controller.enqueue("first");
-            },
-            cancel() {
-              aborted = true;
-            },
-          }),
-      });
-
-      manager.registerStream({
-        messageType: "browser:opening-abort",
-        origin: childOrigin,
-        callback: async () => {
-          await new Promise((resolve) => setTimeout(resolve, 80));
+      );
+      for (const name of ["cancel", "abort", "opening-abort", "open-timeout"]) {
+        register(name, async () => {
+          if (name.startsWith("open"))
+            await new Promise((resolve) => setTimeout(resolve, 80));
           return new ReadableStream({
-            cancel() {
-              openingAborted = true;
+            start(controller) {
+              controller.enqueue("first");
+            },
+            cancel(reason) {
+              cancellations[name] =
+                reason instanceof Error
+                  ? { name: reason.name, message: reason.message }
+                  : reason;
             },
           });
-        },
+        });
+      }
+      manager.register({
+        messageType: "browser:unregister",
+        origin: childOrigin,
+        callback: () => "rpc",
       });
-
-      window.__browserTest = { status: "running" };
+      register(
+        "unregister",
+        () =>
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue("before");
+              manager.unregisterStream("browser:unregister");
+              setTimeout(() => {
+                controller.enqueue("after");
+                controller.close();
+              }, 30);
+            },
+          }),
+      );
+      window.__browserTest = { status: "running", mode };
       window.addEventListener("message", (event) => {
         if (
           event.origin !== childOrigin ||
           event.data?.type !== "browser-test-result"
-        ) {
+        )
           return;
-        }
         setTimeout(() => {
           const result = {
             ...event.data.result,
+            mode,
             userAgent: navigator.userAgent,
-            cancelled,
-            aborted,
-            openingAborted,
+            cancellations,
             uncaught: [...uncaught, ...(event.data.result.uncaught ?? [])],
-            nativeTransferSupported: supportsNativeTransfer(),
           };
+          const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
           result.passed =
-            JSON.stringify(result.normal) === JSON.stringify(["a", "b"]) &&
-            result.callbackError?.name === "CallbackError" &&
-            result.callbackError?.message === "callback failed" &&
-            result.cancelled === true &&
-            result.aborted === true &&
-            result.abortError?.name === "AbortError" &&
-            result.openingAborted === true &&
-            result.openingAbortError?.name === "AbortError" &&
-            result.uncaught.length === 0;
+            equal(result.normal, ["a", "b"]) &&
+            equal(result.callbackError, { code: 429, detail: "retry" }) &&
+            equal(result.streamError, { code: 503, detail: "unavailable" }) &&
+            equal(cancellations.cancel, { action: "stop" }) &&
+            equal(cancellations.abort, { action: "abort" }) &&
+            equal(result.abortError, { action: "abort" }) &&
+            equal(cancellations["opening-abort"], {
+              action: "opening-abort",
+            }) &&
+            equal(result.openingAbortError, { action: "opening-abort" }) &&
+            !!result.openTimeoutError &&
+            !!cancellations["open-timeout"] &&
+            equal(result.unregister, ["before", "after"]) &&
+            result.rpc === "rpc" &&
+            !!result.unregisteredError &&
+            result.uncaught.length === 0 &&
+            result.transports?.[mode] > 0 &&
+            result.transports?.[mode === "native" ? "fallback" : "native"] ===
+              0;
           window.__browserTest = result;
           document.querySelector("#result").textContent = JSON.stringify(
             result,
             null,
-            2
+            2,
           );
           fetch("/browser-test/result", {
             method: "POST",
@@ -138,7 +144,6 @@
           });
         }, 150);
       });
-
       const iframe = document.createElement("iframe");
       iframe.src = `${childOrigin}/browser-test/child.html`;
       document.body.appendChild(iframe);

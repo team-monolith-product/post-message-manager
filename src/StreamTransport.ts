@@ -1,14 +1,9 @@
 const STREAM_ERROR = "post-message-manager-stream-error";
 const STREAM_PORT = "post-message-manager-stream-port";
 
-type SerializedError = {
-  name: string;
-  message: string;
-};
-
 type StreamErrorWire = {
   type: typeof STREAM_ERROR;
-  error: SerializedError;
+  error: unknown;
 };
 
 type StreamPortWire = {
@@ -20,8 +15,8 @@ type PortMessage<T> =
   | { type: "pull" }
   | { type: "chunk"; value: T }
   | { type: "close" }
-  | { type: "error"; error: SerializedError }
-  | { type: "cancel" };
+  | { type: "error"; error: unknown }
+  | { type: "cancel"; reason: unknown };
 
 export type StreamWire<T> =
   | ReadableStream<T>
@@ -51,16 +46,15 @@ export function supportsNativeStreamTransfer(): boolean {
 }
 
 export function serializeStreamError(error: unknown): StreamErrorWire {
-  const value = error instanceof Error ? error : new Error(String(error));
   return {
     type: STREAM_ERROR,
-    error: { name: value.name, message: value.message },
+    error,
   };
 }
 
 export function createStreamWire<T>(
   source: ReadableStream<T>,
-  useNative = supportsNativeStreamTransfer()
+  useNative = supportsNativeStreamTransfer(),
 ): StreamWire<T> {
   if (!(source instanceof ReadableStream)) {
     throw new TypeError("registerStream callback must return a ReadableStream");
@@ -76,9 +70,7 @@ export function createStreamWire<T>(
   };
 }
 
-export function streamWireTransferList<T>(
-  wire: StreamWire<T>
-): Transferable[] {
+export function streamWireTransferList<T>(wire: StreamWire<T>): Transferable[] {
   if (wire instanceof ReadableStream) {
     return [wire];
   }
@@ -96,7 +88,7 @@ export function readStreamWire<T>(wire: unknown): ReadableStream<T> {
     return readFromPort<T>(wire.port);
   }
   if (isStreamErrorWire(wire)) {
-    throw reviveError(wire.error);
+    throw wire.error;
   }
   throw new TypeError("Invalid stream response");
 }
@@ -106,6 +98,7 @@ function createReadablePort<T>(source: ReadableStream<T>): MessagePort {
   const reader = source.getReader();
   let terminal = false;
   let reading = false;
+  let sourceClosed = false;
 
   const finish = () => {
     if (terminal) {
@@ -122,7 +115,9 @@ function createReadablePort<T>(source: ReadableStream<T>): MessagePort {
 
   const sendError = (error: unknown) => {
     try {
-      send({ type: "error", error: toSerializedError(error) });
+      send({ type: "error", error });
+    } catch (cloneError) {
+      send({ type: "error", error: cloneError });
     } finally {
       finish();
     }
@@ -135,7 +130,10 @@ function createReadablePort<T>(source: ReadableStream<T>): MessagePort {
 
     if (event.data.type === "cancel") {
       if (finish()) {
-        void reader.cancel().catch(() => undefined);
+        void reader
+          .cancel(event.data.reason)
+          .catch(() => undefined)
+          .finally(() => reader.releaseLock());
       }
       return;
     }
@@ -153,74 +151,102 @@ function createReadablePort<T>(source: ReadableStream<T>): MessagePort {
       if (done) {
         send({ type: "close" });
         finish();
+        reader.releaseLock();
       } else {
         send({ type: "chunk", value });
+        if (sourceClosed) {
+          send({ type: "close" });
+          finish();
+          reader.releaseLock();
+        }
       }
     } catch (error) {
       if (!terminal) {
         sendError(error);
+        void reader
+          .cancel(error)
+          .catch(() => undefined)
+          .finally(() => reader.releaseLock());
       }
     } finally {
       reading = false;
     }
   };
   channel.port1.start();
+  void reader.closed.then(
+    () => {
+      sourceClosed = true;
+      if (!terminal && !reading) {
+        send({ type: "close" });
+        finish();
+        reader.releaseLock();
+      }
+    },
+    (error) => {
+      if (!terminal) {
+        sendError(error);
+        reader.releaseLock();
+      }
+    },
+  );
 
   return channel.port2;
 }
 
 function readFromPort<T>(port: MessagePort): ReadableStream<T> {
-  return new ReadableStream<T>({
-    start(controller) {
-      let terminal = false;
-      const finish = () => {
-        if (terminal) {
-          return false;
-        }
+  let terminal = false;
+  return new ReadableStream<T>(
+    {
+      start(controller) {
+        const finish = () => {
+          if (terminal) {
+            return false;
+          }
+          terminal = true;
+          port.close();
+          return true;
+        };
+
+        port.onmessage = (event: MessageEvent<PortMessage<T>>) => {
+          if (terminal) {
+            return;
+          }
+
+          const message = event.data;
+          if (message.type === "chunk") {
+            controller.enqueue(message.value);
+          } else if (message.type === "close") {
+            if (finish()) {
+              controller.close();
+            }
+          } else if (message.type === "error") {
+            if (finish()) {
+              controller.error(message.error);
+            }
+          }
+        };
+        port.start();
+      },
+      pull() {
+        port.postMessage({ type: "pull" } satisfies PortMessage<T>);
+      },
+      cancel(reason) {
         terminal = true;
-        port.close();
-        return true;
-      };
-
-      port.onmessage = (event: MessageEvent<PortMessage<T>>) => {
-        if (terminal) {
-          return;
+        try {
+          port.postMessage({ type: "cancel", reason } satisfies PortMessage<T>);
+        } catch (error) {
+          port.postMessage({
+            type: "cancel",
+            reason: error,
+          } satisfies PortMessage<T>);
+          throw error;
+        } finally {
+          port.close();
         }
-
-        const message = event.data;
-        if (message.type === "chunk") {
-          controller.enqueue(message.value);
-        } else if (message.type === "close") {
-          if (finish()) {
-            controller.close();
-          }
-        } else if (message.type === "error") {
-          if (finish()) {
-            controller.error(reviveError(message.error));
-          }
-        }
-      };
-      port.start();
+      },
     },
-    pull() {
-      port.postMessage({ type: "pull" } satisfies PortMessage<T>);
-    },
-    cancel() {
-      port.postMessage({ type: "cancel" } satisfies PortMessage<T>);
-      port.close();
-    },
-  });
-}
-
-function toSerializedError(error: unknown): SerializedError {
-  const value = error instanceof Error ? error : new Error(String(error));
-  return { name: value.name, message: value.message };
-}
-
-function reviveError(error: SerializedError): Error {
-  const value = new Error(error.message);
-  value.name = error.name;
-  return value;
+    { highWaterMark: 0 },
+  );
 }
 
 function isStreamErrorWire(value: unknown): value is StreamErrorWire {

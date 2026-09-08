@@ -2,617 +2,385 @@ import { jest } from "@jest/globals";
 import {
   ReadableStream as NodeReadableStream,
   TransformStream as NodeTransformStream,
-  WritableStream as NodeWritableStream,
 } from "node:stream/web";
 import { MessageChannel as NodeMessageChannel } from "node:worker_threads";
 import { PostMessageManagerImpl } from "./PostMessageManager";
-import {
-  createStreamWire,
-  readStreamWire,
-  streamWireTransferList,
-  supportsNativeStreamTransfer,
-} from "./StreamTransport";
-
-const ORIGIN = "https://parent.example.com";
-const sentMessages: any[] = [];
-const sentTransfers: Transferable[][] = [];
 
 Object.assign(globalThis, {
   MessageChannel: NodeMessageChannel,
   ReadableStream: NodeReadableStream,
   TransformStream: NodeTransformStream,
-  WritableStream: NodeWritableStream,
 });
+const ORIGIN = "https://parent.example.com";
+const messages: any[] = [];
 
 beforeAll(() => {
+  // jsdom omits origin/source; MessageChannel performs structured clone and transfer.
   window.postMessage = ((
     message: unknown,
-    targetOriginOrOptions?: string | WindowPostMessageOptions
+    options?: string | WindowPostMessageOptions,
   ) => {
-    const transfer =
-      typeof targetOriginOrOptions === "object"
-        ? targetOriginOrOptions.transfer ?? []
-        : [];
-    const delivered = message;
-    sentMessages.push(delivered);
-    sentTransfers.push([...transfer]);
-    queueMicrotask(() => {
+    const channel = new MessageChannel();
+    channel.port2.onmessage = (event) => {
+      channel.port1.close();
+      channel.port2.close();
       window.dispatchEvent(
         new MessageEvent("message", {
-          data: delivered,
+          data: event.data,
           origin: ORIGIN,
           source: window,
-        })
+        }),
       );
-    });
+    };
+    try {
+      channel.port1.postMessage(
+        message,
+        typeof options === "object" ? (options.transfer ?? []) : [],
+      );
+      messages.push(message);
+    } catch (error) {
+      channel.port1.close();
+      channel.port2.close();
+      throw error;
+    }
   }) as typeof window.postMessage;
 });
 
-const manager = new PostMessageManagerImpl();
-const sendBase = { target: window, targetOrigin: "*" };
-
-async function collect<T>(iterator: AsyncIterable<T>): Promise<T[]> {
-  const chunks: T[] = [];
-  for await (const chunk of iterator) {
-    chunks.push(chunk);
+const manager = new PostMessageManagerImpl(100);
+const request = (messageType: string) => ({
+  messageType,
+  payload: null,
+  target: window,
+  targetOrigin: "*",
+});
+const pause = () => new Promise<void>((resolve) => setTimeout(resolve, 10));
+async function collect<T>(opening: Promise<ReadableStream<T>>) {
+  const reader = (await opening).getReader();
+  const values: T[] = [];
+  try {
+    for (;;) {
+      const result = await reader.read();
+      if (result.done) return values;
+      values.push(result.value);
+    }
+  } finally {
+    reader.releaseLock();
   }
-  return chunks;
+}
+function source(...values: string[]) {
+  return new ReadableStream<string>({
+    start(controller) {
+      values.forEach((value) => controller.enqueue(value));
+      controller.close();
+    },
+  });
 }
 
-async function nextTask(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 0));
-}
-
-describe("request/response compatibility", () => {
-  it("resolves send with the registered callback result", async () => {
-    manager.register({
-      messageType: "compat:echo",
-      callback: (payload) => ({ echoed: payload }),
-    });
-
-    await expect(
-      manager.send({ messageType: "compat:echo", payload: 1, ...sendBase })
-    ).resolves.toEqual({ echoed: 1 });
-  });
-
-  it("removes the response handler after a timeout", async () => {
-    await expect(
-      manager.send({
-        messageType: "compat:timeout",
-        payload: null,
-        timeoutMs: 10,
-        ...sendBase,
-      })
-    ).rejects.toThrow("Timeout");
-
-    expect(Object.keys(manager.responseHandlers)).toHaveLength(0);
-  });
-
-  it("does not interpret an application payload as a stream wire", async () => {
+describe("request and stream contracts", () => {
+  it("round trips application payloads without interpreting stream tags", async () => {
     const payload = {
       type: "post-message-manager-stream-port",
       port: { application: true },
     };
-    const firstMessage = sentMessages.length;
-    manager.register({
-      messageType: "compat:stream-shaped-payload",
-      callback: () => payload,
-    });
-
-    await expect(
-      manager.send({
-        messageType: "compat:stream-shaped-payload",
-        payload: null,
-        ...sendBase,
-      })
-    ).resolves.toBe(payload);
-    const responseIndex = sentMessages.findIndex(
-      (message, index) =>
-        index >= firstMessage &&
-        message.type === "response" &&
-        message.messageType === "compat:stream-shaped-payload"
-    );
-    expect(sentTransfers[responseIndex]).toEqual([]);
-  });
-});
-
-describe("stream transport", () => {
-  it("detects native transferable stream support without a user-agent check", () => {
-    expect(supportsNativeStreamTransfer()).toBe(true);
+    manager.register({ messageType: "echo", callback: () => payload });
+    await expect(manager.send(request("echo"))).resolves.toEqual(payload);
   });
 
-  it("moves a native stream through an actual MessagePort transfer", async () => {
-    const channel = new MessageChannel();
-    const wire = createStreamWire(
-      new ReadableStream({
-        start(controller) {
-          controller.enqueue("native");
-          controller.close();
-        },
-      }),
-      true
-    );
-    const received = new Promise<unknown>((resolve) => {
-      channel.port2.onmessage = (event) => resolve(event.data);
-    });
-
-    channel.port1.postMessage(wire, streamWireTransferList(wire));
-    const reader = readStreamWire<string>(await received).getReader();
-    await expect(reader.read()).resolves.toEqual({
-      done: false,
-      value: "native",
-    });
-    await expect(reader.read()).resolves.toEqual({
-      done: true,
-      value: undefined,
-    });
-    channel.port1.close();
-    channel.port2.close();
-  });
-
-  it("transfers ordered chunks and closes through the native path", async () => {
+  it("sends a stream request immediately and returns a readable stream", async () => {
     manager.registerStream({
-      messageType: "stream:native",
-      callback: () =>
-        new ReadableStream({
-          start(controller) {
-            controller.enqueue("a");
-            controller.enqueue("b");
-            controller.close();
-          },
-        }),
+      messageType: "eager",
+      callback: () => source("a", "b"),
     });
-
-    await expect(
-      collect(
-        manager.stream({
-          messageType: "stream:native",
-          payload: null,
-          ...sendBase,
-        })
-      )
-    ).resolves.toEqual(["a", "b"]);
+    const opening = manager.stream<string>(request("eager"));
+    expect(messages[messages.length - 1]).toMatchObject({
+      messageType: "eager",
+      stream: true,
+    });
+    expect(await opening).toBeInstanceOf(ReadableStream);
+    await expect(collect(opening)).resolves.toEqual(["a", "b"]);
   });
 
-  it("transfers ordered chunks and closes through the MessagePort fallback", async () => {
-    manager.register({
-      messageType: "stream:fallback",
-      callback: () =>
-        createStreamWire(
-          new ReadableStream({
-            start(controller) {
-              controller.enqueue(1);
-              controller.enqueue(2);
-              controller.close();
-            },
-          }),
-          false
+  it("keeps concurrent streams independent", async () => {
+    manager.registerStream({
+      messageType: "parallel",
+      callback: (payload) => source(payload),
+    });
+    await expect(
+      Promise.all(
+        ["left", "right"].map((payload) =>
+          collect(manager.stream({ ...request("parallel"), payload })),
         ),
-    });
-
-    await expect(
-      collect(
-        manager.stream({
-          messageType: "stream:fallback",
-          payload: null,
-          ...sendBase,
-        })
-      )
-    ).resolves.toEqual([1, 2]);
+      ),
+    ).resolves.toEqual([["left"], ["right"]]);
   });
 
-  it("keeps concurrent streams isolated", async () => {
+  it("keeps RPC and stream registrations and removals independent", async () => {
+    manager.register({ messageType: "shared", callback: () => "rpc" });
     manager.registerStream({
-      messageType: "stream:parallel",
-      callback: (payload) =>
-        new ReadableStream({
-          start(controller) {
-            controller.enqueue(`${payload}-1`);
-            controller.enqueue(`${payload}-2`);
-            controller.close();
+      messageType: "shared",
+      callback: () => source("stream"),
+    });
+    await expect(manager.send(request("shared"))).resolves.toBe("rpc");
+    await expect(collect(manager.stream(request("shared")))).resolves.toEqual([
+      "stream",
+    ]);
+    manager.unregisterStream("shared");
+    await expect(manager.send(request("shared"))).resolves.toBe("rpc");
+    await expect(
+      manager.stream({ ...request("shared"), timeoutMs: 10 }),
+    ).rejects.toThrow("Timeout");
+    manager.registerStream({
+      messageType: "shared",
+      callback: () => source("kept"),
+    });
+    manager.unregister("shared");
+    await expect(collect(manager.stream(request("shared")))).resolves.toEqual([
+      "kept",
+    ]);
+    await expect(
+      manager.send({ ...request("shared"), timeoutMs: 10 }),
+    ).rejects.toThrow("Timeout");
+  });
+
+  it("lets an active stream finish after unregisterStream", async () => {
+    let controller!: ReadableStreamDefaultController<string>;
+    manager.registerStream({
+      messageType: "unregister",
+      callback: () =>
+        new ReadableStream<string>({
+          start(value) {
+            controller = value;
           },
         }),
     });
-
-    const left = collect(
-      manager.stream<string>({
-        messageType: "stream:parallel",
-        payload: "left",
-        ...sendBase,
-      })
-    );
-    const right = collect(
-      manager.stream<string>({
-        messageType: "stream:parallel",
-        payload: "right",
-        ...sendBase,
-      })
-    );
-
-    await expect(Promise.all([left, right])).resolves.toEqual([
-      ["left-1", "left-2"],
-      ["right-1", "right-2"],
-    ]);
+    const stream = await manager.stream<string>(request("unregister"));
+    manager.unregisterStream("unregister");
+    controller.enqueue("kept");
+    controller.close();
+    await expect(collect(Promise.resolve(stream))).resolves.toEqual(["kept"]);
+    await expect(
+      manager.stream({ ...request("unregister"), timeoutMs: 10 }),
+    ).rejects.toThrow("Timeout");
   });
 
-  it("propagates an error from a native stream", async () => {
+  it.each([false, true])(
+    "preserves a cloneable callback error (async=%s)",
+    async (asyncCallback) => {
+      const reason = { code: 429, retryAfter: 10 };
+      manager.registerStream({
+        messageType: "callback",
+        callback: () => {
+          if (asyncCallback) return Promise.reject(reason);
+          throw reason;
+        },
+      });
+      await expect(manager.stream(request("callback"))).rejects.toEqual(reason);
+    },
+  );
+
+  it("preserves a cloneable source error", async () => {
     manager.registerStream({
-      messageType: "stream:error",
+      messageType: "error",
       callback: () =>
         new ReadableStream({
           start(controller) {
-            controller.error(new Error("stream failed"));
+            controller.error({ code: 429 });
           },
         }),
     });
-
-    await expect(
-      collect(
-        manager.stream({
-          messageType: "stream:error",
-          payload: null,
-          ...sendBase,
-        })
-      )
-    ).rejects.toThrow("stream failed");
+    await expect(collect(manager.stream(request("error")))).rejects.toEqual({
+      code: 429,
+    });
   });
 
-  it("returns a serialized error when the stream callback rejects", async () => {
+  it("reports a callback clone failure without waiting for timeout", async () => {
     manager.registerStream({
-      messageType: "stream:callback-error",
-      callback: async () => {
-        throw Object.assign(new Error("callback failed"), {
-          name: "CallbackError",
+      messageType: "uncloneable",
+      callback: () => {
+        throw () => undefined;
+      },
+    });
+    await expect(manager.stream(request("uncloneable"))).rejects.toBeDefined();
+    expect(
+      messages.some(
+        (message) =>
+          message.type === "response" && message.messageType === "uncloneable",
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps normal completion after the signal aborts", async () => {
+    const controller = new AbortController();
+    manager.registerStream({
+      messageType: "completed",
+      callback: () => source("done"),
+    });
+    const reader = (
+      await manager.stream({
+        ...request("completed"),
+        signal: controller.signal,
+      })
+    ).getReader();
+    await reader.read();
+    await expect(reader.read()).resolves.toMatchObject({ done: true });
+    controller.abort();
+    await expect(reader.read()).resolves.toMatchObject({ done: true });
+    reader.releaseLock();
+  });
+
+  it("ignores cancellation from another window or origin", async () => {
+    let resolveSource!: (value: ReadableStream<string>) => void;
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    manager.registerStream({
+      messageType: "spoof",
+      callback: () => {
+        entered();
+        return new Promise<ReadableStream<string>>((resolve) => {
+          resolveSource = resolve;
         });
       },
     });
-
-    await expect(
-      collect(
-        manager.stream({
-          messageType: "stream:callback-error",
-          payload: null,
-          ...sendBase,
-        })
-      )
-    ).rejects.toMatchObject({
-      name: "CallbackError",
-      message: "callback failed",
-    });
+    const opening = manager.stream<string>(request("spoof"));
+    await started;
+    const id = messages[messages.length - 1].id;
+    for (const sender of [
+      { origin: "https://other.example.com", source: window },
+      { origin: ORIGIN, source: null },
+    ]) {
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          data: { type: "stream-cancel", parentId: id, reason: "spoof" },
+          ...sender,
+        }),
+      );
+    }
+    resolveSource(source("kept"));
+    await expect(collect(opening)).resolves.toEqual(["kept"]);
   });
 
-  it("returns a serialized error when the stream callback throws", async () => {
+  it("rejects a pre-aborted signal without sending a request", async () => {
+    const controller = new AbortController();
+    const reason = { cancelled: "before-open" };
+    controller.abort(reason);
+    const count = messages.length;
+    await expect(
+      manager.stream({ ...request("pre-abort"), signal: controller.signal }),
+    ).rejects.toBe(reason);
+    expect(messages).toHaveLength(count);
+  });
+
+  it.each(["abort", "timeout"])(
+    "cancels a late source after opening %s",
+    async (mode) => {
+      let resolveSource!: (value: ReadableStream<string>) => void;
+      let entered!: () => void;
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      let cancelled!: (reason: unknown) => void;
+      const cancellation = new Promise<unknown>((resolve) => {
+        cancelled = resolve;
+      });
+      manager.registerStream({
+        messageType: mode,
+        callback: () => {
+          entered();
+          return new Promise<ReadableStream<string>>((resolve) => {
+            resolveSource = resolve;
+          });
+        },
+      });
+      const controller = new AbortController();
+      const opening = manager.stream({
+        ...request(mode),
+        signal: controller.signal,
+        timeoutMs: 40,
+      });
+      const rejection =
+        mode === "abort"
+          ? expect(opening).rejects.toEqual({ cancelled: "opening" })
+          : expect(opening).rejects.toThrow("Timeout");
+      await started;
+      if (mode === "abort") controller.abort({ cancelled: "opening" });
+      await rejection;
+      await pause();
+      resolveSource(new ReadableStream<string>({ cancel: cancelled }));
+      if (mode === "abort")
+        await expect(cancellation).resolves.toEqual({ cancelled: "opening" });
+      else
+        await expect(cancellation).resolves.toMatchObject({
+          message: expect.stringContaining("Timeout"),
+        });
+    },
+  );
+
+  it("aborts a pending read and forwards the signal reason", async () => {
+    let cancelled!: (reason: unknown) => void;
+    const cancellation = new Promise<unknown>((resolve) => {
+      cancelled = resolve;
+    });
     manager.registerStream({
-      messageType: "stream:callback-throw",
-      callback: () => {
-        throw new Error("callback threw");
+      messageType: "active-abort",
+      callback: () => new ReadableStream({ cancel: cancelled }),
+    });
+    const controller = new AbortController();
+    const reader = (
+      await manager.stream({
+        ...request("active-abort"),
+        signal: controller.signal,
+      })
+    ).getReader();
+    const read = reader.read();
+    controller.abort({ cancelled: "active" });
+    await expect(read).rejects.toEqual({ cancelled: "active" });
+    await expect(cancellation).resolves.toEqual({ cancelled: "active" });
+    reader.releaseLock();
+  });
+
+  it("forwards consumer cancellation with a reason", async () => {
+    let cancelled!: (reason: unknown) => void;
+    const cancellation = new Promise<unknown>((resolve) => {
+      cancelled = resolve;
+    });
+    manager.registerStream({
+      messageType: "cancel",
+      callback: () => new ReadableStream({ cancel: cancelled }),
+    });
+    const stream = await manager.stream(request("cancel"));
+    await stream.cancel({ cancelled: "consumer" });
+    await expect(cancellation).resolves.toEqual({ cancelled: "consumer" });
+  });
+
+  it("supports pipeTo and releases its lock", async () => {
+    manager.registerStream({
+      messageType: "pipe",
+      callback: () => source("a"),
+    });
+    const stream = await manager.stream<string>(request("pipe"));
+    const transform = new TransformStream<string, string>({
+      transform(value, controller) {
+        controller.enqueue(value.toUpperCase());
       },
     });
-
-    await expect(
-      collect(
-        manager.stream({
-          messageType: "stream:callback-throw",
-          payload: null,
-          ...sendBase,
-        })
-      )
-    ).rejects.toThrow("callback threw");
-  });
-
-  it("does not send a request for an already aborted signal", async () => {
-    const callback = jest.fn(() => new ReadableStream<never>());
-    manager.registerStream({
-      messageType: "stream:pre-aborted",
-      callback,
-    });
-    const abortController = new AbortController();
-    abortController.abort();
-
-    await expect(
-      collect(
-        manager.stream({
-          messageType: "stream:pre-aborted",
-          payload: null,
-          signal: abortController.signal,
-          ...sendBase,
-        })
-      )
-    ).rejects.toMatchObject({ name: "AbortError" });
-    expect(callback).not.toHaveBeenCalled();
-    expect(
-      sentMessages.some(
-        (message) => message.messageType === "stream:pre-aborted"
-      )
-    ).toBe(false);
-  });
-
-  it("cancels a stream that arrives after the opening request is aborted", async () => {
-    const cancelled = jest.fn<(reason?: unknown) => void>();
-    let resolveSource!: (source: ReadableStream<string>) => void;
-    manager.registerStream({
-      messageType: "stream:opening-abort",
-      callback: () =>
-        new Promise<ReadableStream<string>>((resolve) => {
-          resolveSource = resolve;
-        }),
-    });
-    const abortController = new AbortController();
-    const result = collect(
-      manager.stream({
-        messageType: "stream:opening-abort",
-        payload: null,
-        signal: abortController.signal,
-        timeoutMs: 10,
-        ...sendBase,
-      })
-    );
-    await nextTask();
-
-    abortController.abort();
-    await expect(result).rejects.toMatchObject({ name: "AbortError" });
-    await new Promise((resolve) => setTimeout(resolve, 20));
-
-    resolveSource(
-      new ReadableStream<string>({
-        cancel: cancelled,
-      })
-    );
-    await nextTask();
-    await nextTask();
-
-    expect(cancelled).toHaveBeenCalledTimes(1);
-  });
-
-  it("ignores an opening cancellation from another origin", async () => {
-    const cancelled = jest.fn<(reason?: unknown) => void>();
-    let resolveSource!: (source: ReadableStream<string>) => void;
-    manager.registerStream({
-      messageType: "stream:cancel-origin",
-      callback: () =>
-        new Promise<ReadableStream<string>>((resolve) => {
-          resolveSource = resolve;
-        }),
-    });
-    const result = collect(
-      manager.stream<string>({
-        messageType: "stream:cancel-origin",
-        payload: null,
-        ...sendBase,
-      })
-    );
-    await nextTask();
-    const request = [...sentMessages]
-      .reverse()
-      .find(
-        (message) =>
-          message.type === "request" &&
-          message.messageType === "stream:cancel-origin"
-      );
-
-    window.dispatchEvent(
-      new MessageEvent("message", {
-        data: { type: "stream-cancel", parentId: request.id },
-        origin: "https://other.example.com",
-        source: window,
-      })
-    );
-    resolveSource(
-      new ReadableStream<string>({
-        start(controller) {
-          controller.enqueue("kept");
-          controller.close();
-        },
-        cancel: cancelled,
-      })
-    );
-
-    await expect(result).resolves.toEqual(["kept"]);
-    expect(cancelled).not.toHaveBeenCalled();
-  });
-
-  it("preserves AbortError when the source rejects cancellation", async () => {
-    const cancelled = jest.fn(async () => {
-      throw new Error("cancel failed");
-    });
-    manager.registerStream({
-      messageType: "stream:cancel-rejection",
-      callback: () =>
-        new ReadableStream<string>({
-          start(controller) {
-            controller.enqueue("first");
-          },
-          cancel: cancelled,
-        }),
-    });
-    const abortController = new AbortController();
-    const iterator = manager.stream({
-      messageType: "stream:cancel-rejection",
-      payload: null,
-      signal: abortController.signal,
-      ...sendBase,
-    });
-    await iterator.next();
-    abortController.abort();
-    await expect(iterator.next()).rejects.toMatchObject({ name: "AbortError" });
-    await nextTask();
-    expect(cancelled).toHaveBeenCalledTimes(1);
-  });
-
-  it("settles abort without waiting for source cancellation to finish", async () => {
-    manager.registerStream({
-      messageType: "stream:pending-cancel",
-      callback: () =>
-        new ReadableStream<string>({
-          start(controller) {
-            controller.enqueue("first");
-          },
-          cancel: () => new Promise<void>(() => undefined),
-        }),
-    });
-    const abortController = new AbortController();
-    const iterator = manager.stream({
-      messageType: "stream:pending-cancel",
-      payload: null,
-      signal: abortController.signal,
-      ...sendBase,
-    });
-    await iterator.next();
-    abortController.abort();
-    await expect(iterator.next()).rejects.toMatchObject({ name: "AbortError" });
-  });
-
-  it("cancels the native source when the consumer stops early", async () => {
-    const cancelled = jest.fn<(reason?: unknown) => void>();
-    manager.registerStream({
-      messageType: "stream:native-cancel",
-      callback: () =>
-        new ReadableStream<string>({
-          start(controller) {
-            controller.enqueue("first");
-          },
-          cancel: cancelled,
-        }),
-    });
-
-    for await (const chunk of manager.stream({
-      messageType: "stream:native-cancel",
-      payload: null,
-      ...sendBase,
-    })) {
-      expect(chunk).toBe("first");
-      break;
-    }
-    await nextTask();
-
-    expect(cancelled).toHaveBeenCalledTimes(1);
-  });
-
-  it("cancels the fallback source when the consumer stops early", async () => {
-    const cancelled = jest.fn<(reason?: unknown) => void>();
-    manager.register({
-      messageType: "stream:fallback-cancel",
-      callback: () =>
-        createStreamWire(
-          new ReadableStream<string>({
-            start(controller) {
-              controller.enqueue("first");
-            },
-            cancel: cancelled,
-          }),
-          false
-        ),
-    });
-
-    for await (const chunk of manager.stream({
-      messageType: "stream:fallback-cancel",
-      payload: null,
-      ...sendBase,
-    })) {
-      expect(chunk).toBe("first");
-      break;
-    }
-    await nextTask();
-
-    expect(cancelled).toHaveBeenCalledTimes(1);
-  });
-
-  it("propagates AbortSignal cancellation to the source", async () => {
-    const cancelled = jest.fn<(reason?: unknown) => void>();
-    manager.registerStream({
-      messageType: "stream:abort",
-      callback: () =>
-        new ReadableStream<string>({
-          start(controller) {
-            controller.enqueue("first");
-          },
-          cancel: cancelled,
-        }),
-    });
-    const abortController = new AbortController();
-    const iterator = manager.stream({
-      messageType: "stream:abort",
-      payload: null,
-      signal: abortController.signal,
-      ...sendBase,
-    });
-
-    await expect(iterator.next()).resolves.toEqual({
-      done: false,
-      value: "first",
-    });
-    abortController.abort();
-    await expect(iterator.next()).rejects.toMatchObject({ name: "AbortError" });
-    await nextTask();
-
-    expect(cancelled).toHaveBeenCalledTimes(1);
-  });
-
-  it("times out while waiting for an unregistered stream", async () => {
-    await expect(
-      collect(
-        manager.stream({
-          messageType: "stream:missing",
-          payload: null,
-          timeoutMs: 10,
-          ...sendBase,
-        })
-      )
-    ).rejects.toThrow("Timeout");
+    const output = collect(Promise.resolve(transform.readable));
+    await stream.pipeTo(transform.writable);
+    await expect(output).resolves.toEqual(["A"]);
+    expect(stream.locked).toBe(false);
   });
 
   it("applies the origin predicate to stream registration", async () => {
-    const callback = jest.fn(
-      () =>
-        new ReadableStream({
-          start(controller) {
-            controller.close();
-          },
-        })
-    );
+    const callback = jest.fn(() => source());
     manager.registerStream({
-      messageType: "stream:origin",
+      messageType: "origin",
       origin: (origin) => origin === "https://other.example.com",
       callback,
     });
-
     await expect(
-      collect(
-        manager.stream({
-          messageType: "stream:origin",
-          payload: null,
-          timeoutMs: 10,
-          ...sendBase,
-        })
-      )
+      manager.stream({ ...request("origin"), timeoutMs: 10 }),
     ).rejects.toThrow("Timeout");
     expect(callback).not.toHaveBeenCalled();
-  });
-
-  it("stops serving a stream after unregisterStream", async () => {
-    const callback = jest.fn(() => new ReadableStream<never>());
-    manager.registerStream({
-      messageType: "stream:unregister",
-      callback,
-    });
-    manager.unregisterStream("stream:unregister");
-
-    await expect(
-      collect(
-        manager.stream({
-          messageType: "stream:unregister",
-          payload: null,
-          timeoutMs: 10,
-          ...sendBase,
-        })
-      )
-    ).rejects.toThrow("Timeout");
-    expect(callback).not.toHaveBeenCalled();
-  });
-
-  it("rejects an invalid stream response", () => {
-    expect(() => readStreamWire({ transport: "native" })).toThrow(
-      "Invalid stream response"
-    );
   });
 });

@@ -12,6 +12,7 @@ interface MessageRequest {
   messageType: string;
   id: string;
   payload: any;
+  stream?: true;
 }
 
 // response type 메시지 객체 구성입니다.
@@ -25,6 +26,7 @@ interface MessageResponse {
 interface MessageStreamCancel {
   type: "stream-cancel";
   parentId: string;
+  reason: unknown;
 }
 
 type RequestContext = {
@@ -39,7 +41,7 @@ type PreparedResponse = {
 type RequestHandler = {
   callback: (
     payload: any,
-    context: RequestContext
+    context: RequestContext,
   ) => Promise<PreparedResponse> | PreparedResponse;
   origin?: string | ((origin: string) => boolean);
 };
@@ -49,24 +51,19 @@ type ResponseHandler = {
 } & Pick<MessageResponse, "type" | "parentId">;
 type StreamRequestState = {
   cancelled: boolean;
+  reason?: unknown;
   origin: string;
   source: MessageEventSource | null;
 };
 
 function isOriginAllowed(
   allowed: string | ((origin: string) => boolean) | undefined,
-  origin: string
+  origin: string,
 ): boolean {
   if (!allowed) {
     return true;
   }
   return typeof allowed === "string" ? allowed === origin : allowed(origin);
-}
-
-function createAbortError(messageType: string): Error {
-  const error = new Error(`Stream for ${messageType} was aborted`);
-  error.name = "AbortError";
-  return error;
 }
 
 export namespace PostMessageManager {
@@ -121,13 +118,14 @@ export interface PostMessageManager {
   notify(args: PostMessageManager.NotifyProps): void;
   registerStream<T>(args: PostMessageManager.RegisterStreamProps<T>): void;
   unregisterStream(messageType: string): void;
-  stream<T>(args: PostMessageManager.StreamProps): AsyncGenerator<T, void, void>;
+  stream<T>(args: PostMessageManager.StreamProps): Promise<ReadableStream<T>>;
 }
 
 export class PostMessageManagerImpl implements PostMessageManager {
   constructor(timeoutMs = 3000) {
     this.requestHandlers = Object.create(null);
     this.responseHandlers = Object.create(null);
+    this.streamHandlers = Object.create(null);
     this.streamRequestStates = Object.create(null);
     this.timeoutMs = timeoutMs;
     this._init();
@@ -138,9 +136,7 @@ export class PostMessageManagerImpl implements PostMessageManager {
   }
 
   private async _onMessage(
-    event: MessageEvent<
-      MessageResponse | MessageRequest | MessageStreamCancel
-    >
+    event: MessageEvent<MessageResponse | MessageRequest | MessageStreamCancel>,
   ) {
     const { data } = event;
 
@@ -152,11 +148,14 @@ export class PostMessageManagerImpl implements PostMessageManager {
         state.source === event.source
       ) {
         state.cancelled = true;
+        state.reason = data.reason;
       }
     } else if (data.type === "request") {
       // request type의 message를 받으면, handler를 찾아서 실행하고 response message를 보낸다.
       const { messageType, payload, id } = data;
-      const handler = this.requestHandlers[messageType];
+      const handler = (
+        data.stream ? this.streamHandlers : this.requestHandlers
+      )[messageType];
       if (!handler) {
         return;
       }
@@ -181,10 +180,21 @@ export class PostMessageManagerImpl implements PostMessageManager {
       // srcdoc iframe의 origin은 "null"(opaque origin)이므로 postMessage의
       // targetOrigin으로 사용할 수 없다. 이 경우 "*"로 대체한다.
       const responseOrigin = event.origin === "null" ? "*" : event.origin;
-      event.source?.postMessage(message, {
-        targetOrigin: responseOrigin,
-        transfer: response.transfer,
-      });
+      try {
+        event.source?.postMessage(message, {
+          targetOrigin: responseOrigin,
+          transfer: response.transfer,
+        });
+      } catch (error) {
+        if (!data.stream) throw error;
+        event.source?.postMessage(
+          {
+            ...message,
+            payload: serializeStreamError(error),
+          },
+          { targetOrigin: responseOrigin },
+        );
+      }
     } else if (data.type === "response") {
       // response type의 message를 받으면, handler를 찾아서
       // resolve하고, handler를 삭제한다.
@@ -226,7 +236,11 @@ export class PostMessageManagerImpl implements PostMessageManager {
     return this._send<T>(args);
   }
 
-  private _send<T>(args: PostMessageManager.SendProps, id = uid()) {
+  private _send<T>(
+    args: PostMessageManager.SendProps,
+    id = uid(),
+    stream?: true,
+  ) {
     const {
       messageType,
       payload,
@@ -242,8 +256,8 @@ export class PostMessageManagerImpl implements PostMessageManager {
       const timer = setTimeout(() => {
         reject(
           new Error(
-            `Timeout: no response for ${messageType} after ${timeoutMs}ms`
-          )
+            `Timeout: no response for ${messageType} after ${timeoutMs}ms`,
+          ),
         );
         delete this.responseHandlers[id];
       }, timeoutMs);
@@ -253,14 +267,21 @@ export class PostMessageManagerImpl implements PostMessageManager {
         id,
         payload,
         messageType,
+        ...(stream ? { stream } : {}),
       };
-      target.postMessage(message, targetOrigin);
       this.responseHandlers[id] = {
         type: "response",
         parentId: id,
         resolve,
         timer,
       };
+      try {
+        target.postMessage(message, targetOrigin);
+      } catch (error) {
+        clearTimeout(timer);
+        delete this.responseHandlers[id];
+        reject(error);
+      }
     });
   }
 
@@ -277,10 +298,10 @@ export class PostMessageManagerImpl implements PostMessageManager {
 
   registerStream<T>(args: PostMessageManager.RegisterStreamProps<T>): void {
     const { messageType, callback, origin } = args;
-    this._register(messageType, {
+    this.streamHandlers[messageType] = {
       origin,
       callback: async (payload, context) => {
-        const state = {
+        const state: StreamRequestState = {
           cancelled: false,
           origin: context.origin,
           source: context.source,
@@ -289,9 +310,11 @@ export class PostMessageManagerImpl implements PostMessageManager {
         try {
           const source = await callback(payload);
           if (state.cancelled) {
-            const error = createAbortError(messageType);
-            void source.cancel(error).catch(() => undefined);
-            return { payload: serializeStreamError(error), transfer: [] };
+            void source.cancel(state.reason).catch(() => undefined);
+            return {
+              payload: serializeStreamError(state.reason),
+              transfer: [],
+            };
           }
           const response = createStreamWire(source);
           return {
@@ -304,96 +327,61 @@ export class PostMessageManagerImpl implements PostMessageManager {
           delete this.streamRequestStates[context.id];
         }
       },
-    });
+    };
   }
 
   unregisterStream(messageType: string): void {
-    this.unregister(messageType);
+    delete this.streamHandlers[messageType];
   }
 
-  stream<T>(args: PostMessageManager.StreamProps): AsyncGenerator<T, void, void> {
-    const manager = this;
-    return (async function* () {
-      const { signal, ...sendArgs } = args;
-      if (signal?.aborted) {
-        throw createAbortError(args.messageType);
-      }
-
-      const requestId = uid();
-      let reader: ReadableStreamDefaultReader<T> | undefined;
-      let abortError: Error | undefined;
-      let rejectOpening: ((reason: Error) => void) | undefined;
-      const openingAborted = signal
-        ? new Promise<never>((_, reject) => {
-            rejectOpening = reject;
-          })
-        : undefined;
-      const onAbort = () => {
-        abortError = createAbortError(args.messageType);
-        if (reader) {
-          void reader.cancel(abortError).catch(() => undefined);
-        } else {
-          const message: MessageStreamCancel = {
-            type: "stream-cancel",
-            parentId: requestId,
-          };
-          sendArgs.target.postMessage(message, sendArgs.targetOrigin);
-          rejectOpening?.(abortError);
-        }
+  async stream<T>(
+    args: PostMessageManager.StreamProps,
+  ): Promise<ReadableStream<T>> {
+    const { signal, ...sendArgs } = args;
+    if (signal?.aborted) {
+      throw signal.reason;
+    }
+    const requestId = uid();
+    let rejectOpening: (reason: unknown) => void = () => undefined;
+    const aborted = new Promise<never>((_, reject) => {
+      rejectOpening = reject;
+    });
+    const onAbort = () => rejectOpening(signal!.reason);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    const response = this._send<unknown>(sendArgs, requestId, true);
+    let wire: unknown;
+    try {
+      wire = await Promise.race([response, aborted]);
+    } catch (reason) {
+      const message: MessageStreamCancel = {
+        type: "stream-cancel",
+        parentId: requestId,
+        reason,
       };
-      signal?.addEventListener("abort", onAbort, { once: true });
-
       try {
-        const response = manager._send<unknown>(sendArgs, requestId);
-        let wire: unknown;
-        try {
-          wire = openingAborted
-            ? await Promise.race([response, openingAborted])
-            : await response;
-        } catch (error) {
-          if (abortError) {
-            void response
-              .then((lateWire) =>
-                readStreamWire<T>(lateWire).cancel(abortError)
-              )
-              .catch(() => undefined);
-          }
-          throw error;
-        }
-
-        reader = readStreamWire<T>(wire).getReader();
-        rejectOpening = undefined;
-        if (abortError) {
-          throw abortError;
-        }
-
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (abortError) {
-            throw abortError;
-          }
-          if (done) {
-            return;
-          }
-          yield value;
-        }
-      } finally {
-        signal?.removeEventListener("abort", onAbort);
-        try {
-          if (abortError) {
-            void reader?.cancel(abortError).catch(() => undefined);
-          } else {
-            await reader?.cancel();
-          }
-        } finally {
-          reader?.releaseLock();
-        }
+        sendArgs.target.postMessage(message, sendArgs.targetOrigin);
+      } catch (error) {
+        sendArgs.target.postMessage(
+          { ...message, reason: error },
+          sendArgs.targetOrigin,
+        );
       }
-    })();
+      void response
+        .then((lateWire) => readStreamWire<T>(lateWire).cancel(reason))
+        .catch(() => undefined);
+      throw reason;
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
+    }
+    const source = readStreamWire<T>(wire);
+    return signal
+      ? source.pipeThrough(new TransformStream<T, T>(), { signal })
+      : source;
   }
 
   requestHandlers: Record<string, RequestHandler>;
   responseHandlers: Record<string, ResponseHandler>;
   private streamRequestStates: Record<string, StreamRequestState>;
+  private streamHandlers: Record<string, RequestHandler>;
   timeoutMs: number;
 }
