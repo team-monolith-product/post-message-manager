@@ -307,6 +307,22 @@ interface StreamProps extends SendProps {
 
 ## 주의사항
 
+### 브라우저 테스트
+
+Node.js 22 이상에서 `npm run test:browser`를 실행합니다. Mac에서는 설치된 Safari의 WebDriver를 사용합니다. Safari 개발자 설정에서 Allow remote automation을 허용해야 합니다.
+
+Windows/Linux와 CI에서는 `WEBDRIVER_URL`을 팀의 원격 WebDriver 서버 또는 실기기 서비스 주소로 설정하고 다음 명령을 실행합니다.
+
+```sh
+npm run test:browser -- browser-test/remote.example.json
+```
+
+설정 파일의 `parentUrl`과 `childOrigin`은 원격 브라우저가 접근할 수 있는 서로 다른 origin이어야 합니다. 두 주소에 이 checkout의 browser-test 페이지와 dist 번들을 배포하거나, 실기기 서비스의 로컬 터널을 연결합니다. 터널을 사용하는 경우 `serveLocal: true`로 로컬 테스트 서버도 시작할 수 있습니다. `capabilities`에는 서비스가 요구하는 Safari 버전, OS, 기기 정보를 지정합니다. 인증값은 저장소 밖 설정이나 환경변수로 관리합니다.
+
+기본 실행은 `auto`와 `fallback` 두 경로를 검사합니다. `auto`는 실제 브라우저의 transferable 지원 여부에 따라 기대 전송 경로를 정합니다. `native`를 명시하면 native transfer가 지원돼야 통과합니다. 결과는 browser-test/results.json에 브라우저 버전, user agent, 지원 여부와 테스트 결과를 기록합니다. 실행 환경이나 결과가 없으면 실패로 종료합니다.
+
+원격 실행에는 별도로 준비된 Mac/WebDriver 서버 또는 실기기 서비스 계정이 필요합니다. `npm run test:browser:config`는 실행 설정 검사이며 실제 브라우저 검증은 `test:browser`가 수행합니다.
+
 ### Origin 검증의 중요성
 
 보안을 위해 반드시 `origin` 옵션을 사용하여 신뢰할 수 있는 출처의 메시지만 처리하세요.

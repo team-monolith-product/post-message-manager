@@ -1,7 +1,7 @@
 import { createReadStream, statSync } from "node:fs";
 import { createServer } from "node:http";
 import { extname, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = resolve(fileURLToPath(new URL(".", import.meta.url)), "..");
 const contentTypes = {
@@ -45,6 +45,38 @@ function stat(file) {
   }
 }
 
-start(4173);
-start(4174);
-console.log("http://127.0.0.1:4173/browser-test/parent.html");
+export async function startServers() {
+  const servers = [];
+  try {
+    for (const port of [4173, 4174]) {
+      const server = start(port);
+      servers.push(server);
+      await new Promise((resolve, reject) => {
+        server.once("listening", resolve);
+        server.once("error", reject);
+      });
+    }
+    return async () => {
+      await Promise.all(
+        servers.map(
+          (server) =>
+            new Promise((resolve) => {
+              server.close(resolve);
+              server.closeAllConnections();
+            }),
+        ),
+      );
+    };
+  } catch (error) {
+    servers.forEach((server) => server.close());
+    throw error;
+  }
+}
+
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(process.argv[1]).href
+) {
+  await startServers();
+  console.log("http://127.0.0.1:4173/browser-test/parent.html");
+}

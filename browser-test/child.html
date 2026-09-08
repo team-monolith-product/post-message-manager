@@ -7,7 +7,10 @@
   </head>
   <body>
     <script>
-      const parentOrigin = "http://127.0.0.1:4173";
+      const parentOrigin = new URL(
+        new URLSearchParams(location.search).get("parentOrigin") ??
+          "http://127.0.0.1:4173",
+      ).origin;
       const delayedResponses = new WeakSet();
       window.addEventListener("message", (event) => {
         if (

@@ -4,7 +4,25 @@
     <meta charset="utf-8" />
     <title>PostMessageManager stream browser test</title>
     <script>
-      const mode = new URLSearchParams(location.search).get("mode") ?? "native";
+      const params = new URLSearchParams(location.search);
+      const mode = params.get("mode") ?? "native";
+      const nativeTransferSupported = (() => {
+        const channel = new MessageChannel();
+        const stream = new ReadableStream({
+          start(controller) {
+            controller.close();
+          },
+        });
+        try {
+          channel.port1.postMessage(stream, [stream]);
+          return true;
+        } catch {
+          return false;
+        } finally {
+          channel.port1.close();
+          channel.port2.close();
+        }
+      })();
       if (mode === "fallback") {
         const postMessage = MessagePort.prototype.postMessage;
         MessagePort.prototype.postMessage = function (value, transfer) {
@@ -22,7 +40,15 @@
   <body>
     <pre id="result">running</pre>
     <script>
-      const childOrigin = "http://127.0.0.1:4174";
+      const childOrigin = new URL(
+        params.get("childOrigin") ?? "http://127.0.0.1:4174",
+      ).origin;
+      const expectedTransport =
+        mode === "auto"
+          ? nativeTransferSupported
+            ? "native"
+            : "fallback"
+          : mode;
       const manager = new PostMessageManager.default(500);
       const cancellations = {};
       const uncaught = [];
@@ -101,7 +127,12 @@
             },
           }),
       );
-      window.__browserTest = { status: "running", mode };
+      window.__browserTest = {
+        status: "running",
+        mode,
+        nativeTransferSupported,
+        expectedTransport,
+      };
       window.addEventListener("message", (event) => {
         if (
           event.origin !== childOrigin ||
@@ -112,6 +143,8 @@
           const result = {
             ...event.data.result,
             mode,
+            nativeTransferSupported,
+            expectedTransport,
             userAgent: navigator.userAgent,
             cancellations,
             uncaught: [...uncaught, ...(event.data.result.uncaught ?? [])],
@@ -136,8 +169,10 @@
             result.rpc === "rpc" &&
             !!result.unregisteredError &&
             result.uncaught.length === 0 &&
-            result.transports?.[mode] > 0 &&
-            result.transports?.[mode === "native" ? "fallback" : "native"] ===
+            result.transports?.[expectedTransport] > 0 &&
+            result.transports?.[
+              expectedTransport === "native" ? "fallback" : "native"
+            ] ===
               0;
           window.__browserTest = result;
           document.querySelector("#result").textContent = JSON.stringify(
@@ -153,7 +188,9 @@
         }, 150);
       });
       const iframe = document.createElement("iframe");
-      iframe.src = `${childOrigin}/browser-test/child.html`;
+      const childUrl = new URL("/browser-test/child.html", childOrigin);
+      childUrl.searchParams.set("parentOrigin", location.origin);
+      iframe.src = childUrl.href;
       document.body.appendChild(iframe);
     </script>
   </body>
