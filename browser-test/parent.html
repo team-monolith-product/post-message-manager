@@ -4,7 +4,26 @@
     <meta charset="utf-8" />
     <title>PostMessageManager stream browser test</title>
     <script>
-      const mode = new URLSearchParams(location.search).get("mode") ?? "native";
+      const mode = new URLSearchParams(location.search).get("mode") ?? "auto";
+      const nativeSupported = (() => {
+        const channel = new MessageChannel();
+        try {
+          const stream = new ReadableStream({
+            start(c) {
+              c.close();
+            },
+          });
+          channel.port1.postMessage(stream, [stream]);
+          return true;
+        } catch {
+          return false;
+        } finally {
+          channel.port1.close();
+          channel.port2.close();
+        }
+      })();
+      const expectedTransport =
+        mode === "auto" ? (nativeSupported ? "native" : "fallback") : mode;
       if (mode === "fallback") {
         const postMessage = MessagePort.prototype.postMessage;
         MessagePort.prototype.postMessage = function (value, transfer) {
@@ -112,6 +131,8 @@
           const result = {
             ...event.data.result,
             mode,
+            nativeSupported,
+            expectedTransport,
             userAgent: navigator.userAgent,
             cancellations,
             uncaught: [...uncaught, ...(event.data.result.uncaught ?? [])],
@@ -136,10 +157,16 @@
             result.rpc === "rpc" &&
             !!result.unregisteredError &&
             result.uncaught.length === 0 &&
-            result.transports?.[mode] > 0 &&
-            result.transports?.[mode === "native" ? "fallback" : "native"] ===
-              0;
+            result.transports?.[expectedTransport] > 0 &&
+            result.transports?.[
+              expectedTransport === "native" ? "fallback" : "native"
+            ] === 0;
           window.__browserTest = result;
+          if (window.parent !== window)
+            window.parent.postMessage(
+              { type: "e2e-case-result", result },
+              location.origin,
+            );
           document.querySelector("#result").textContent = JSON.stringify(
             result,
             null,

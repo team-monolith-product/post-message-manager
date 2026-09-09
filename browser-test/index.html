@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>PMM local browser tests</title>
+  </head>
+  <body>
+    <h1 id="status">RUNNING</h1>
+    <p id="browser"></p>
+    <p>
+      Automatic transport selection and forced fallback. Reload to run again.
+    </p>
+    <pre id="result"></pre>
+    <script>
+      const modes = ["auto", "fallback"];
+      const results = [];
+      let frame;
+      let timer;
+      document.querySelector("#browser").textContent = navigator.userAgent;
+      function next() {
+        document.querySelector("#result").textContent = JSON.stringify(
+          results,
+          null,
+          2,
+        );
+        if (results.length === modes.length) {
+          const report = {
+            passed: results.every((r) => r.passed === true),
+            userAgent: navigator.userAgent,
+            results,
+          };
+          window.__e2eResult = report;
+          document.querySelector("#status").textContent = report.passed
+            ? "PASS"
+            : "FAIL";
+          fetch("/browser-test/result", {
+            method: "POST",
+            body: JSON.stringify(report),
+          }).catch(() => {});
+          return;
+        }
+        const mode = modes[results.length];
+        frame = document.createElement("iframe");
+        frame.title = `${mode} test`;
+        frame.src = `./parent.html?mode=${mode}`;
+        timer = setTimeout(() => {
+          frame.hidden = true;
+          results.push({
+            mode,
+            passed: false,
+            error: "No result within 15 seconds",
+          });
+          next();
+        }, 15000);
+        document.body.appendChild(frame);
+      }
+      window.addEventListener("message", (event) => {
+        if (
+          event.origin !== location.origin ||
+          event.source !== frame?.contentWindow ||
+          event.data?.type !== "e2e-case-result"
+        )
+          return;
+        if (results.length === modes.length) return;
+        clearTimeout(timer);
+        frame.hidden = true;
+        const result = event.data.result;
+        results.push(
+          result?.mode === modes[results.length]
+            ? result
+            : { passed: false, error: "Unexpected result mode" },
+        );
+        next();
+      });
+      next();
+    </script>
+  </body>
+</html>

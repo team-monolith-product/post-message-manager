@@ -11,7 +11,9 @@
     "build:browser": "esbuild src/index.ts --bundle --outfile=dist/post-message-manager.js --format=iife --global-name=PostMessageManager --minify",
     "test": "npm run test:typecheck && NODE_OPTIONS=--experimental-vm-modules jest",
     "test:typecheck": "tsc --project tsconfig.test.json",
-    "test:browser:serve": "node browser-test/server.mjs"
+    "test:browser:serve": "node browser-test/server.mjs",
+    "e2e": "node browser-test/run.mjs",
+    "test:e2e": "node --test browser-test/open-browser.test.mjs browser-test/server.test.mjs"
   },
   "devDependencies": {
     "@types/jest": "^30.0.0",

@@ -1,7 +1,7 @@
 import { createReadStream, statSync } from "node:fs";
 import { createServer } from "node:http";
 import { extname, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = resolve(fileURLToPath(new URL(".", import.meta.url)), "..");
 const contentTypes = {
@@ -22,6 +22,17 @@ function start(port) {
         console.log(`BROWSER_TEST_RESULT ${body}`);
         response.writeHead(204).end();
       });
+      return;
+    }
+    if (
+      ![
+        "/browser-test/index.html",
+        "/browser-test/parent.html",
+        "/browser-test/child.html",
+        "/dist/post-message-manager.js",
+      ].includes(pathname)
+    ) {
+      response.writeHead(404).end();
       return;
     }
     const file = resolve(root, `.${pathname}`);
@@ -45,6 +56,30 @@ function stat(file) {
   }
 }
 
-start(4173);
-start(4174);
-console.log("http://127.0.0.1:4173/browser-test/parent.html");
+export async function startServers(ports = [4173, 4174]) {
+  const servers = [];
+  try {
+    for (const port of ports) {
+      const server = start(port);
+      servers.push(server);
+      await new Promise((resolve, reject) => {
+        server.once("listening", resolve);
+        server.once("error", reject);
+      });
+    }
+    return servers;
+  } catch (error) {
+    await Promise.all(
+      servers.map((server) => new Promise((resolve) => server.close(resolve))),
+    );
+    throw error;
+  }
+}
+
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(process.argv[1]).href
+) {
+  await startServers();
+  console.log("http://127.0.0.1:4173/browser-test/index.html");
+}

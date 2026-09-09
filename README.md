@@ -363,6 +363,24 @@ useEffect(() => {
 }, []);
 ```
 
+## 로컬 브라우저 테스트
+
+의존성을 설치한 뒤 다음 명령으로 브라우저 번들을 빌드하고 로컬 테스트 서버를 실행합니다.
+
+```sh
+npm run e2e
+npm run e2e -- --browser default
+npm run e2e -- --browser chrome
+npm run e2e -- --browser safari
+npm run e2e -- --browser firefox
+```
+
+브라우저를 지정하지 않으면 URL만 출력합니다. 설치된 로컬 브라우저로 URL을 열어도 됩니다. `safari` 선택은 macOS에서만 지원합니다. 앱을 열지 못하면 URL을 직접 열도록 안내하며 서버는 유지됩니다. WebDriver, 브라우저 자동화 권한, 원격 서비스는 필요하지 않습니다.
+
+페이지는 서로 다른 localhost 포트의 iframe으로 자동 선택된 전송 경로와 강제 fallback을 검사하고 PASS/FAIL, user agent, 전송 경로 및 상세 결과를 표시합니다. Safari에서 native transfer를 지원하지 않으면 자동 선택 검사도 fallback으로 실행합니다. 버전 조합 테스트는 이 명령에 포함하지 않습니다.
+
+이 명령은 서버를 유지하며, 브라우저 테스트 실패를 프로세스 종료 코드로 반환하지 않습니다. 결과는 페이지와 터미널에서 확인하고 Ctrl+C로 종료합니다. CI에는 연결되어 있지 않습니다. `npm run test:e2e`는 실행 옵션과 서버의 단위 검사이며 실제 브라우저 검증이 아닙니다.
+
 ## 빌드
 
 ```bash
