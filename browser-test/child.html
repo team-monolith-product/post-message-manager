@@ -3,14 +3,11 @@
   <head>
     <meta charset="utf-8" />
     <title>PostMessageManager stream browser test child</title>
-    <script src="/browser-test/load-bundle.js"></script>
+    <script src="/dist/post-message-manager.js"></script>
   </head>
   <body>
     <script>
-      const parentOrigin = new URL(
-        new URLSearchParams(location.search).get("parentOrigin") ??
-          "http://127.0.0.1:4173",
-      ).origin;
+      const parentOrigin = "http://127.0.0.1:4173";
       const delayedResponses = new WeakSet();
       window.addEventListener("message", (event) => {
         if (

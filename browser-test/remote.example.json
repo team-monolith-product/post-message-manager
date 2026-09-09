@@ -1,8 +1,0 @@
-{
-  "parentUrl": "https://parent.example.com/browser-test/parent.html",
-  "childOrigin": "https://child.example.com",
-  "capabilities": {
-    "browserName": "safari"
-  },
-  "modes": ["auto", "fallback"]
-}
