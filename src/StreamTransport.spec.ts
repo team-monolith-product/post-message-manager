@@ -57,20 +57,6 @@ describe.each([true, false])("stream transport native=%s", (native) => {
     });
   });
 
-  it("propagates cancellation to the source", async () => {
-    const cancelled = jest.fn<() => void>();
-    const wire = createStreamWire(
-      new ReadableStream({ cancel: cancelled }),
-      native,
-    );
-    const reader = (await transfer(wire)).getReader();
-
-    await reader.cancel();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    expect(cancelled).toHaveBeenCalledTimes(1);
-  });
-
   it("propagates source errors", async () => {
     const error = { code: 429, detail: ["source failed"] };
     const wire = createStreamWire(
@@ -114,18 +100,19 @@ describe.each([true, false])("stream transport native=%s", (native) => {
     const reasonReceived = new Promise((resolve) => {
       observed = resolve;
     });
-    const source = new ReadableStream({
-      cancel(reason) {
-        observed(reason);
-        return new Promise<void>((resolve) => {
-          finish = resolve;
-        });
-      },
+    const cancel = jest.fn((reason: unknown) => {
+      observed(reason);
+      return new Promise<void>((resolve) => {
+        finish = resolve;
+      });
     });
+    const source = new ReadableStream({ cancel });
     const stream = await transfer(createStreamWire(source, native));
     const reason = { code: "user-cancel", details: [1, 2] };
     await stream.cancel(reason);
     await expect(reasonReceived).resolves.toEqual(reason);
+    await stream.cancel();
+    expect(cancel).toHaveBeenCalledTimes(1);
     finish();
   });
 

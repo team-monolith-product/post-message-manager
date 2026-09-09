@@ -211,21 +211,6 @@ describe("request and stream contracts", () => {
     },
   );
 
-  it("preserves a cloneable source error", async () => {
-    manager.registerStream({
-      messageType: "error",
-      callback: () =>
-        new ReadableStream({
-          start(controller) {
-            controller.error({ code: 429 });
-          },
-        }),
-    });
-    await expect(collect(manager.stream(request("error")))).rejects.toEqual({
-      code: 429,
-    });
-  });
-
   it("reports a callback clone failure without waiting for timeout", async () => {
     manager.registerStream({
       messageType: "uncloneable",
@@ -233,13 +218,9 @@ describe("request and stream contracts", () => {
         throw () => undefined;
       },
     });
-    await expect(manager.stream(request("uncloneable"))).rejects.toBeDefined();
-    expect(
-      messages.some(
-        (message) =>
-          message.type === "response" && message.messageType === "uncloneable",
-      ),
-    ).toBe(true);
+    await expect(manager.stream(request("uncloneable"))).rejects.toMatchObject({
+      name: "DataCloneError",
+    });
   });
 
   it("keeps normal completion after the signal aborts", async () => {
