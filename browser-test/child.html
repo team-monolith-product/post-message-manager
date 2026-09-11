@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>PostMessageManager stream browser test child</title>
+    <script src="/dist/post-message-manager.js"></script>
+  </head>
+  <body>
+    <script>
+      const parentOrigin = "http://127.0.0.1:4173";
+      const delayedResponses = new WeakSet();
+      window.addEventListener("message", (event) => {
+        if (
+          event.origin !== parentOrigin ||
+          event.data?.type !== "response" ||
+          event.data?.messageType !== "browser:late-response" ||
+          delayedResponses.has(event.data)
+        )
+          return;
+        event.stopImmediatePropagation();
+        delayedResponses.add(event.data);
+        setTimeout(
+          () =>
+            window.dispatchEvent(
+              new MessageEvent("message", {
+                data: event.data,
+                origin: event.origin,
+                source: event.source,
+                ports: event.ports,
+              }),
+            ),
+          60,
+        );
+      });
+      const manager = new PostMessageManager.default(500);
+      const uncaught = [];
+      const transports = { native: 0, fallback: 0 };
+      window.addEventListener("message", (event) => {
+        if (event.origin !== parentOrigin) return;
+        if (event.data?.payload instanceof ReadableStream) transports.native++;
+        if (event.data?.payload?.type === "post-message-manager-stream-port")
+          transports.fallback++;
+      });
+      window.addEventListener("error", (event) => uncaught.push(event.message));
+      window.addEventListener("unhandledrejection", (event) =>
+        uncaught.push(String(event.reason)),
+      );
+      const request = {
+        payload: null,
+        target: window.parent,
+        targetOrigin: parentOrigin,
+      };
+      const open = (name, options = {}) =>
+        manager.stream({
+          ...request,
+          messageType: `browser:${name}`,
+          ...options,
+        });
+      async function collect(name) {
+        const reader = (await open(name)).getReader();
+        const values = [];
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) return values;
+            values.push(value);
+          }
+        } finally {
+          reader.releaseLock();
+        }
+      }
+      async function failure(operation) {
+        try {
+          await operation();
+          return null;
+        } catch (reason) {
+          return reason instanceof Error
+            ? { name: reason.name, message: reason.message }
+            : reason;
+        }
+      }
+      async function run() {
+        const normal = await collect("normal");
+        const callbackError = await failure(() => collect("callback-error"));
+        const streamError = await failure(() => collect("stream-error"));
+        const reader = (await open("cancel")).getReader();
+        await reader.read();
+        await reader.cancel({ action: "stop" });
+        reader.releaseLock();
+        const controller = new AbortController();
+        const abortReader = (
+          await open("abort", { signal: controller.signal })
+        ).getReader();
+        await abortReader.read();
+        const abortRead = failure(() => abortReader.read());
+        controller.abort({ action: "abort" });
+        const abortError = await abortRead;
+        abortReader.releaseLock();
+        const openingController = new AbortController();
+        const opening = open("opening-abort", {
+          signal: openingController.signal,
+          timeoutMs: 10,
+        });
+        const openingFailure = failure(() => opening);
+        setTimeout(
+          () => openingController.abort({ action: "opening-abort" }),
+          0,
+        );
+        const openingAbortError = await openingFailure;
+        const openTimeoutError = await failure(() =>
+          open("open-timeout", { timeoutMs: 10 }),
+        );
+        const lateResponseError = await failure(() =>
+          open("late-response", { timeoutMs: 10 }),
+        );
+        const unregister = await collect("unregister");
+        const rpc = await manager.send({
+          ...request,
+          messageType: "browser:unregister",
+        });
+        const unregisteredError = await failure(() =>
+          open("unregister", { timeoutMs: 20 }),
+        );
+        return {
+          normal,
+          callbackError,
+          streamError,
+          abortError,
+          openingAbortError,
+          openTimeoutError,
+          lateResponseError,
+          unregister,
+          rpc,
+          unregisteredError,
+          transports,
+          uncaught,
+        };
+      }
+      run()
+        .then((result) => {
+          window.parent.postMessage(
+            { type: "browser-test-result", result },
+            parentOrigin,
+          );
+        })
+        .catch((reason) => {
+          window.parent.postMessage(
+            {
+              type: "browser-test-result",
+              result: {
+                fatal: { name: reason.name, message: reason.message },
+                uncaught,
+              },
+            },
+            parentOrigin,
+          );
+        });
+    </script>
+  </body>
+</html>

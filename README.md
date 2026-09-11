@@ -108,6 +108,54 @@ manager.notify({
 });
 ```
 
+### 스트림 보내고 받기
+
+```typescript
+manager.registerStream<string>({
+  messageType: "generateText",
+  callback: ({ prompt }) =>
+    new ReadableStream({
+      start(controller) {
+        controller.enqueue(`${prompt}: first`);
+        controller.enqueue(`${prompt}: second`);
+        controller.close();
+      },
+    }),
+  origin: "https://trusted-site.com",
+});
+```
+
+`stream()`은 호출 즉시 요청하고 스트림이 열리면 `ReadableStream`을 반환합니다. 스트림이나 `AbortSignal`을 취소하면 공급자에도 취소 사유가 전달됩니다.
+
+```typescript
+const controller = new AbortController();
+
+const stream = await manager.stream<string>({
+  messageType: "generateText",
+  payload: { prompt: "hello" },
+  target: iframe.contentWindow!,
+  targetOrigin: "https://trusted-site.com",
+  signal: controller.signal,
+  timeoutMs: 5000,
+});
+const reader = stream.getReader();
+try {
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    console.log(value);
+  }
+} finally {
+  try {
+    await reader.cancel();
+  } finally {
+    reader.releaseLock();
+  }
+}
+```
+
+브라우저가 transferable `ReadableStream`을 지원하면 native 전송을 사용합니다. 지원하지 않으면 내부 `MessagePort` 전송을 사용합니다. `registerStream` callback이 실패하면 소비자에게 즉시 오류를 전달합니다.
+
 ### 핸들러 제거
 
 ```typescript
@@ -209,6 +257,20 @@ interface RegisterProps {
 
 등록된 메시지 핸들러를 제거합니다.
 
+### `registerStream<T>(args: RegisterStreamProps<T>): void`
+
+```typescript
+interface RegisterStreamProps<T> {
+  messageType: string;
+  callback: (payload: any) => ReadableStream<T> | Promise<ReadableStream<T>>;
+  origin?: string | ((origin: string) => boolean);
+}
+```
+
+### `unregisterStream(messageType: string): void`
+
+새 요청을 받지 않도록 스트림 핸들러를 제거합니다. 이미 시작된 스트림은 계속 진행합니다. 개별 스트림은 `cancel()`이나 `AbortSignal`로 취소합니다. 일반 메시지 핸들러와 스트림 핸들러는 같은 이름으로 등록할 수 있으며 각각 `unregister()`와 `unregisterStream()`으로 제거합니다.
+
 ### `send<T>(args: SendProps): Promise<T>`
 
 메시지를 보내고 응답을 기다립니다.
@@ -230,6 +292,18 @@ interface SendProps {
 ```typescript
 type NotifyProps = Omit<SendProps, "timeoutMs">;
 ```
+
+### `stream<T>(args: StreamProps): Promise<ReadableStream<T>>`
+
+```typescript
+interface StreamProps extends SendProps {
+  signal?: AbortSignal;
+}
+```
+
+`timeoutMs`는 호출부터 스트림이 열릴 때까지 기다리는 시간입니다. 기한이 지나면 요청이 실패하고 뒤늦게 반환되는 공급자 스트림도 취소됩니다. `signal`은 요청 시작 전부터 스트림을 읽는 동안까지 적용되며 취소 사유는 `signal.reason`입니다.
+
+공급자는 스트림을 빠르게 반환하고, `cancel()`에서 자신의 네트워크 요청을 중단해야 합니다. callback이 스트림을 반환할 때까지 내부 작업의 생명주기는 callback이 관리합니다. 취소된 요청에서 반환한 스트림은 PMM이 취소합니다. SSE의 첫 응답 기한, 재시도, chunk 사이의 대기 시간은 호출부가 정합니다.
 
 ## 주의사항
 
@@ -288,6 +362,24 @@ useEffect(() => {
   };
 }, []);
 ```
+
+## 로컬 브라우저 테스트
+
+의존성을 설치한 뒤 다음 명령으로 브라우저 번들을 빌드하고 로컬 테스트 서버를 실행합니다.
+
+```sh
+npm run e2e
+npm run e2e -- --browser default
+npm run e2e -- --browser chrome
+npm run e2e -- --browser safari
+npm run e2e -- --browser firefox
+```
+
+브라우저를 지정하지 않으면 URL만 출력합니다. 설치된 로컬 브라우저로 URL을 열어도 됩니다. `safari` 선택은 macOS에서만 지원합니다. 앱을 열지 못하면 URL을 직접 열도록 안내하며 서버는 유지됩니다. WebDriver, 브라우저 자동화 권한, 원격 서비스는 필요하지 않습니다.
+
+페이지는 서로 다른 localhost 포트의 iframe으로 자동 선택된 전송 경로와 강제 fallback을 검사하고 PASS/FAIL, user agent, 전송 경로 및 상세 결과를 표시합니다. Safari에서 native transfer를 지원하지 않으면 자동 선택 검사도 fallback으로 실행합니다. 버전 조합 테스트는 이 명령에 포함하지 않습니다.
+
+이 명령은 서버를 유지하며, 브라우저 테스트 실패를 프로세스 종료 코드로 반환하지 않습니다. 결과는 페이지와 터미널에서 확인하고 Ctrl+C로 종료합니다. CI에는 연결되어 있지 않습니다. `npm run test:e2e`는 실행 옵션과 서버의 단위 검사이며 실제 브라우저 검증이 아닙니다.
 
 ## 빌드
 
